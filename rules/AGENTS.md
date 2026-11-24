@@ -1,6 +1,6 @@
 # Context Card — Auto-bind to Current Window
 
-At the start of a new interactive Desktop/IDE top-level conversation (first turn only, when `open_context_card` has not yet been called in this conversation — skip inside subagents and headless CLI `agy -p` runs):
+At the start of a new interactive **Desktop / IDE** top-level conversation (first turn only, when `open_context_card` has not yet been called in this conversation — **skip** inside subagents, Antigravity CLI sessions where `App Data Directory` ends with `antigravity-cli`, and headless `agy -p` runs, since CLI uses the native `statusLine` bar instead of an HTML side panel):
 
 - Call `call_mcp_tool` directly (no need to read the MCP schema file first, and do not skip even on short 1-sentence replies) with:
   - `ServerName`: `"context-card_monitor"`

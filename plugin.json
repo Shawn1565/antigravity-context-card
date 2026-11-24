@@ -1,8 +1,8 @@
 {
   "name": "context-card",
   "displayName": "Context Card",
-  "version": "1.1.0",
-  "description": "Live Claude Desktop-style context window monitor for Google Antigravity: tracks token breakdown (Messages, Thinking, Tool I/O), cache hit rate, checkpoints, /compact, and BYOK reply suggestions.",
+  "version": "1.2.0",
+  "description": "Live context window monitor & smart reply plugin for Google Antigravity: HTML side panel for Desktop/IDE, native ANSI statusLine bar for Antigravity CLI, and one-key tmux prompt insertion.",
   "author": {
     "name": "Shawn1565",
     "url": "https://github.com/Shawn1565"

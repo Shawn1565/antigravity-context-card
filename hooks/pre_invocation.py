@@ -27,6 +27,7 @@ SAFE_CID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
+import core  # noqa: E402
 import habits  # noqa: E402
 
 RUNTIME_DB_PATH = habits.DATA_DIR / "runtime_state.db"
@@ -35,31 +36,7 @@ CONFIG_DIR = Path.home() / ".gemini" / "config"
 
 
 def _is_subagent(cid: str) -> bool:
-    if not cid or not SUMMARIES_DB.is_file():
-        return False
-    try:
-        conn = sqlite3.connect(f"file:{SUMMARIES_DB}?mode=ro", uri=True, timeout=0.4)
-        try:
-            try:
-                row = conn.execute(
-                    "SELECT parent_id FROM conversation_parents WHERE conversation_id = ?",
-                    (cid,),
-                ).fetchone()
-                if row and str(row[0] or "").strip():
-                    return True
-            except sqlite3.Error:
-                pass
-            row2 = conn.execute(
-                "SELECT parent_conversation_id FROM conversation_summaries WHERE conversation_id = ?",
-                (cid,),
-            ).fetchone()
-            if row2 and str(row2[0] or "").strip():
-                return True
-        finally:
-            conn.close()
-    except Exception:
-        pass
-    return False
+    return core.is_subagent(cid, SUMMARIES_DB)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -134,8 +111,8 @@ def main() -> None:
         ws_path = str(payload.get("cwd") or "").strip()
 
     now = time.time()
-        RUNTIME_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(RUNTIME_DB_PATH), timeout=1.2)
+    RUNTIME_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(RUNTIME_DB_PATH), timeout=1.2)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

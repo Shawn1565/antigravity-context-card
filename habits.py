@@ -86,14 +86,30 @@ def resolve_agy_home() -> Path:
 
 
 def resolve_data_dir() -> Path:
-    """Resolve persistent per-user plugin data directory outside the plugin repo."""
+    """Resolve persistent per-user plugin data directory outside the plugin repo (lazy mkdir)."""
     hint = _raw_data_dir_hint()
-    target = hint if hint is not None else (resolve_agy_home() / "plugin_data" / "context-card")
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return target
+    return hint if hint is not None else (resolve_agy_home() / "plugin_data" / "context-card")
+
+
+def use_cli_context(data_dir: Path | str | None = None) -> Path:
+    """Switch module globals to Antigravity CLI host context (CLI config takes precedence)."""
+    global AGY_HOME, DATA_DIR, HABITS_DB_PATH, LLM_CONFIG_PATH, BRAIN_DIR, SUMMARIES_DB
+    global _LLM_CFG_CACHE, _DB_INITIALIZED, _BOOTSTRAPPED
+    cli_home = Path.home() / ".gemini" / "antigravity-cli"
+    AGY_HOME = cli_home
+    if data_dir:
+        DATA_DIR = Path(data_dir).expanduser()
+    else:
+        DATA_DIR = resolve_cli_data_dir()
+    HABITS_DB_PATH = DATA_DIR / "habits.db"
+    LLM_CONFIG_PATH = DATA_DIR / "llm_config.json"
+    BRAIN_DIR = AGY_HOME / "brain"
+    SUMMARIES_DB = AGY_HOME / "conversation_summaries.db"
+    _LLM_CFG_CACHE = None
+    _DB_INITIALIZED = False
+    _BOOTSTRAPPED = False
+    return DATA_DIR
+
 
 AGY_HOME = resolve_agy_home()
 DATA_DIR = resolve_data_dir()
@@ -186,6 +202,7 @@ _RESET_EPOCH = 0
 _DISTILL_LOCK = threading.Lock()
 _DISTILL_IN_PROGRESS = False
 _LLM_CFG_CACHE: dict[str, str] | None = None
+_LLM_CFG_SIG: str = ""
 _BOOTSTRAPPED = False
 
 
@@ -220,7 +237,35 @@ def _is_local_base_url(url: str) -> bool:
     return (parsed.hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
 
 
-def _load_raw_llm_file() -> dict[str, Any]:
+def resolve_cli_data_dir() -> Path:
+    """Resolve persistent plugin data directory specifically for Antigravity CLI (lazy mkdir)."""
+    hint = _raw_data_dir_hint()
+    if hint is not None:
+        return hint
+    return Path.home() / ".gemini" / "antigravity-cli" / "plugin_data" / "context-card"
+
+
+def _candidate_llm_config_paths() -> list[Path]:
+    """Return ordered llm_config.json candidates (current host first, then sibling hosts)."""
+    gemini_root = Path.home() / ".gemini"
+    raw_list = [
+        LLM_CONFIG_PATH,
+        gemini_root / "antigravity" / "plugin_data" / "context-card" / "llm_config.json",
+        gemini_root / "antigravity-ide" / "plugin_data" / "context-card" / "llm_config.json",
+        gemini_root / "antigravity-cli" / "plugin_data" / "context-card" / "llm_config.json",
+    ]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in raw_list:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _load_local_llm_file() -> dict[str, Any]:
+    """Read ONLY the current host's llm_config.json without cross-surface fallback."""
     try:
         if LLM_CONFIG_PATH.is_file():
             raw = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -231,12 +276,71 @@ def _load_raw_llm_file() -> dict[str, Any]:
     return {}
 
 
+def _llm_candidates_signature() -> str:
+    parts: list[str] = []
+    for cand in _candidate_llm_config_paths():
+        try:
+            st = cand.stat()
+            parts.append(f"{cand}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append(f"{cand}:0:0")
+    return "|".join(parts)
+
+
+def _load_effective_llm_file() -> tuple[dict[str, Any], Path | None]:
+    """Read the first active llm_config.json across hosts.
+
+    Only a tombstone (`{"provider": "off"}`) on the CURRENT host's `LLM_CONFIG_PATH`
+    stops resolution; sibling tombstones are skipped so clearing CLI never leaks onto
+    Desktop/IDE or blocks `GEMINI_API_KEY` env vars.
+    """
+    candidates = _candidate_llm_config_paths()
+    for idx, cand in enumerate(candidates):
+        try:
+            if cand.is_file():
+                raw = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    prov = str(raw.get("provider") or "").strip().lower()
+                    if prov == "off" and idx > 0:
+                        continue
+                    return (raw, cand)
+        except Exception:
+            continue
+    return ({}, None)
+
+
+def _load_raw_llm_file() -> dict[str, Any]:
+    raw, _path = _load_effective_llm_file()
+    return raw
+
+
+def get_active_llm_config_path() -> Path | None:
+    """Return the llm_config.json file currently supplying config, or None."""
+    _raw, path = _load_effective_llm_file()
+    return path
+
+
+def has_sibling_llm_config() -> bool:
+    """Return True if any non-local host still has an active (non-'off') llm_config.json."""
+    for cand in _candidate_llm_config_paths()[1:]:
+        try:
+            if cand.is_file():
+                raw = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and str(raw.get("provider") or "").strip().lower() != "off":
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def has_saved_gemini_key() -> bool:
     for env_name in ("CONTEXT_CARD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         if (os.environ.get(env_name) or "").strip():
             return True
     raw = _load_raw_llm_file()
     prov = str(raw.get("provider") or "gemini").strip().lower()
+    if prov == "off":
+        return False
     if prov == "gemini" and str(raw.get("api_key") or "").strip():
         return True
     if str(raw.get("_saved_gemini_key") or raw.get("_saved_api_key") or "").strip():
@@ -249,7 +353,7 @@ def has_saved_gemini_key() -> bool:
 
 def resolve_llm_config() -> dict[str, str]:
     """Resolve LLM auth from plugin env overrides, UI config (llm_config.json), or GEMINI_API_KEY."""
-    global _LLM_CFG_CACHE
+    global _LLM_CFG_CACHE, _LLM_CFG_SIG
 
     oa_base = (os.environ.get("CONTEXT_CARD_OPENAI_BASE_URL") or "").strip()
     oa_key = (os.environ.get("CONTEXT_CARD_OPENAI_API_KEY") or "").strip()
@@ -290,13 +394,23 @@ def resolve_llm_config() -> dict[str, str]:
             "model": model_env or DEFAULT_GEMINI_MODEL,
         }
 
-    if _LLM_CFG_CACHE is not None:
+    sig = _llm_candidates_signature()
+    if _LLM_CFG_CACHE is not None and _LLM_CFG_SIG == sig:
         return dict(_LLM_CFG_CACHE)
+    _LLM_CFG_SIG = sig
 
     # 2. Explicit user choice in plugin_data/llm_config.json (takes precedence over generic GEMINI_API_KEY)
     raw = _load_raw_llm_file()
     if raw:
         prov = str(raw.get("provider") or "gemini").strip().lower()
+        if prov == "off":
+            _LLM_CFG_CACHE = {
+                "provider": "off",
+                "api_key": "",
+                "base_url": GEMINI_API_BASE,
+                "model": DEFAULT_GEMINI_MODEL,
+            }
+            return dict(_LLM_CFG_CACHE)
         key = str(raw.get("api_key") or "").strip()
         if not key and raw.get("api_key_env_file"):
             key = _read_key_from_env_file(str(raw.get("api_key_env_file")))
@@ -375,6 +489,7 @@ def save_llm_config(
     base_url: str = "",
     model: str = "",
     clear_key: bool = False,
+    clear_all: bool = False,
 ) -> bool:
     """Persist auth choice / BYOK credentials locally in plugin_data/llm_config.json (0600)."""
     global _LLM_CFG_CACHE
@@ -384,15 +499,36 @@ def save_llm_config(
     clean_model = (model or "").strip()
 
     if clear_key:
+        if clear_all:
+            for cand in _candidate_llm_config_paths():
+                try:
+                    if cand.is_file():
+                        cand.unlink()
+                except OSError:
+                    pass
+            _LLM_CFG_CACHE = None
+            return has_llm_configured()
+
         if LLM_CONFIG_PATH.is_file():
             try:
                 LLM_CONFIG_PATH.unlink()
             except OSError:
                 pass
+        # If another host (e.g. CLI or Desktop) still has a saved config, write a local
+        # tombstone so Clear reliably disables suggestions on THIS surface.
+        if has_sibling_llm_config():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            tmp_path = LLM_CONFIG_PATH.with_suffix(".tmp")
+            fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"provider": "off"}, f, indent=2)
+                f.write("\n")
+            os.replace(str(tmp_path), str(LLM_CONFIG_PATH))
         _LLM_CFG_CACHE = None
         return has_llm_configured()
 
-    existing = _load_raw_llm_file()
+    # Never read fallback sibling configs here, so credentials are never copied across hosts.
+    existing = _load_local_llm_file()
     old_prov = str(existing.get("provider") or "gemini").strip().lower()
     saved_gemini_key = str(
         existing.get("_saved_gemini_key")
