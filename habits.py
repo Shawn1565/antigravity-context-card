@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,20 +28,46 @@ from typing import Any
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
 
+import sys  # noqa: E402
+
+
+def _raw_data_dir_hint() -> Path | None:
+    raw = ""
+    for arg in sys.argv[1:]:
+        if arg.startswith("--data-dir="):
+            raw = arg.split("=", 1)[1].strip()
+            break
+    if not raw or raw.startswith("${"):
+        raw = (os.environ.get("CONTEXT_CARD_DATA_DIR") or "").strip()
+    if not raw or raw.startswith("${"):
+        raw = (os.environ.get("PLUGIN_DATA") or "").strip()
+    if raw and not raw.startswith("${"):
+        return Path(raw).expanduser()
+    return None
+
+
 def resolve_agy_home() -> Path:
-    """Locate the active Antigravity app data directory across Desktop, IDE, and CLI."""
+    """Locate the active Antigravity host app directory (never hijacked by headless agy CLI)."""
     env_dir = (os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or "").strip()
     if env_dir and Path(env_dir).is_dir():
         return Path(env_dir)
+
+    # Derive directly from host-expanded ${PLUGIN_DATA} (<agy_home>/plugin_data/context-card)
+    data_hint = _raw_data_dir_hint()
+    if data_hint is not None:
+        host_cand = data_hint.parent.parent
+        if (host_cand / "brain").is_dir() or (host_cand / "conversation_summaries.db").is_file():
+            return host_cand
+
     gemini_root = Path.home() / ".gemini"
-    candidates = [
+    # Strictly prioritize interactive GUI hosts (Desktop 2.0 & IDE) over headless CLI
+    gui_candidates = [
         gemini_root / "antigravity",
         gemini_root / "antigravity-ide",
-        gemini_root / "antigravity-cli",
     ]
     best: Path | None = None
     best_mtime = -1.0
-    for cand in candidates:
+    for cand in gui_candidates:
         brain = cand / "brain"
         if brain.is_dir():
             try:
@@ -52,35 +79,21 @@ def resolve_agy_home() -> Path:
                 continue
     if best is not None:
         return best
-    for cand in candidates:
+    for cand in (*gui_candidates, gemini_root / "antigravity-cli"):
         if cand.is_dir():
             return cand
-    return candidates[0]
+    return gui_candidates[0]
 
 
 def resolve_data_dir() -> Path:
     """Resolve persistent per-user plugin data directory outside the plugin repo."""
-    raw = ""
-    for arg in sys.argv[1:]:
-        if arg.startswith("--data-dir="):
-            raw = arg.split("=", 1)[1].strip()
-            break
-    if not raw or raw.startswith("${"):
-        raw = (os.environ.get("CONTEXT_CARD_DATA_DIR") or "").strip()
-    if not raw or raw.startswith("${"):
-        raw = (os.environ.get("PLUGIN_DATA") or "").strip()
-    if raw and not raw.startswith("${"):
-        target = Path(raw).expanduser()
-    else:
-        target = resolve_agy_home() / "plugin_data" / "context-card"
+    hint = _raw_data_dir_hint()
+    target = hint if hint is not None else (resolve_agy_home() / "plugin_data" / "context-card")
     try:
         target.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
     return target
-
-
-import sys  # noqa: E402
 
 AGY_HOME = resolve_agy_home()
 DATA_DIR = resolve_data_dir()
@@ -92,9 +105,39 @@ SUMMARIES_DB = AGY_HOME / "conversation_summaries.db"
 DEFAULT_GEMINI_MODEL = os.environ.get("CONTEXT_CARD_SUGGEST_MODEL", "gemini-2.5-flash")
 FALLBACK_GEMINI_MODEL = "gemini-flash-lite-latest"
 DEFAULT_AGY_SUGGEST_MODEL = os.environ.get("CONTEXT_CARD_AGY_MODEL", "gemini-3.8-flash-low")
-FALLBACK_AGY_SUGGEST_MODEL = "Gemini 4 Neon (Low)"
+FALLBACK_AGY_SUGGEST_MODEL = "gemini-4-neon-low"
 AGY_PROMPT_MAX_BYTES = 100_000
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+_AGY_SAFE_ENV_KEYS = (
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "SYSTEMROOT",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
 
 
 class AgyAuthRequiredError(RuntimeError):
@@ -106,7 +149,7 @@ def find_agy_bin() -> str | None:
     env_bin = (os.environ.get("CONTEXT_CARD_AGY_BIN") or "").strip()
     if env_bin:
         p = Path(env_bin).expanduser()
-        if p.is_file() and os.access(str(p), os.X_OK):
+        if p.name.lower() in ("agy", "agy.exe") and p.is_file() and os.access(str(p), os.X_OK):
             return str(p)
     which_hit = shutil.which("agy")
     if which_hit:
@@ -131,16 +174,15 @@ def find_agy_bin() -> str | None:
     return None
 
 USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
-SHELL_GEMINI_KEY_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:CONTEXT_CARD_GEMINI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)\s*=\s*(['\"]?)([^'\"\s#]+)\1"
-)
 ENV_ANY_KEY_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:CONTEXT_CARD_GEMINI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|CONTEXT_CARD_OPENAI_API_KEY|OPENAI_API_KEY|API_KEY)\s*=\s*(['\"]?)([^'\"\s#]+)\1"
+    r"^\s*(?:export\s+)?(?:CONTEXT_CARD_GEMINI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|CONTEXT_CARD_OPENAI_API_KEY|OPENAI_API_KEY)\s*=\s*(['\"]?)([^'\"\s#]+)\1\s*$"
 )
 ASCII_WORD_RE = re.compile(r"[a-zA-Z0-9_\-]{2,}")
 CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
 _DB_LOCK = threading.Lock()
+_DB_INITIALIZED = False
+_RESET_EPOCH = 0
 _DISTILL_LOCK = threading.Lock()
 _DISTILL_IN_PROGRESS = False
 _LLM_CFG_CACHE: dict[str, str] | None = None
@@ -161,16 +203,21 @@ def _read_key_from_env_file(path_str: str) -> str:
         m = ENV_ANY_KEY_RE.match(line)
         if m and m.group(2):
             return m.group(2).strip()
-    for line in lines:
-        s = line.strip()
-        if s and not s.startswith("#") and "=" not in s and len(s) >= 16:
-            return s
     return ""
 
 
 def _is_local_base_url(url: str) -> bool:
-    low = (url or "").lower()
-    return low.startswith("http://localhost") or low.startswith("http://127.0.0.1") or low.startswith("http://[::1]")
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if parsed.username or parsed.password:
+        return False
+    return (parsed.hostname or "").lower() in ("localhost", "127.0.0.1", "::1")
 
 
 def _load_raw_llm_file() -> dict[str, Any]:
@@ -189,35 +236,29 @@ def has_saved_gemini_key() -> bool:
         if (os.environ.get(env_name) or "").strip():
             return True
     raw = _load_raw_llm_file()
-    if str(raw.get("api_key") or raw.get("_saved_api_key") or "").strip():
+    prov = str(raw.get("provider") or "gemini").strip().lower()
+    if prov == "gemini" and str(raw.get("api_key") or "").strip():
+        return True
+    if str(raw.get("_saved_gemini_key") or raw.get("_saved_api_key") or "").strip():
         return True
     env_file = str(raw.get("api_key_env_file") or raw.get("_saved_env_file") or "").strip()
     if env_file and _read_key_from_env_file(env_file):
         return True
-    for rc_name in (".profile", ".bashrc", ".zshrc"):
-        rc_path = Path.home() / rc_name
-        if rc_path.is_file():
-            try:
-                for line in rc_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    m = SHELL_GEMINI_KEY_RE.match(line)
-                    if m and m.group(2):
-                        return True
-            except OSError:
-                continue
     return False
 
 
 def resolve_llm_config() -> dict[str, str]:
-    """Resolve LLM auth from env vars, plugin_data/llm_config.json, shell rc, or agy subscription."""
+    """Resolve LLM auth from plugin env overrides, UI config (llm_config.json), or GEMINI_API_KEY."""
     global _LLM_CFG_CACHE
 
     oa_base = (os.environ.get("CONTEXT_CARD_OPENAI_BASE_URL") or "").strip()
     oa_key = (os.environ.get("CONTEXT_CARD_OPENAI_API_KEY") or "").strip()
+    cc_gemini_key = (os.environ.get("CONTEXT_CARD_GEMINI_API_KEY") or "").strip()
     provider_env = (os.environ.get("CONTEXT_CARD_PROVIDER") or "").strip().lower()
     model_env = (os.environ.get("CONTEXT_CARD_SUGGEST_MODEL") or "").strip()
     agy_model_env = (os.environ.get("CONTEXT_CARD_AGY_MODEL") or "").strip()
 
-    # 1a. Explicit Antigravity CLI (Gemini Subscription OAuth) via env
+    # 1. Explicit Context Card plugin env overrides
     if provider_env == "agy":
         agy_bin = find_agy_bin()
         if agy_bin:
@@ -228,7 +269,6 @@ def resolve_llm_config() -> dict[str, str]:
                 "model": agy_model_env or model_env or DEFAULT_AGY_SUGGEST_MODEL,
             }
 
-    # 1b. Explicit OpenAI-compatible env vars (OpenRouter, DeepSeek, OpenAI, local Ollama/vLLM)
     if oa_base or provider_env == "openai":
         base = (oa_base or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
         key = oa_key or (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -242,22 +282,18 @@ def resolve_llm_config() -> dict[str, str]:
                 "model": model_env or "gpt-4o-mini",
             }
 
-    # 2. Standard Gemini API key env vars
-    if provider_env != "agy":
-        for env_name in ("CONTEXT_CARD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
-            val = (os.environ.get(env_name) or "").strip()
-            if val:
-                return {
-                    "provider": "gemini",
-                    "api_key": val,
-                    "base_url": GEMINI_API_BASE,
-                    "model": model_env or DEFAULT_GEMINI_MODEL,
-                }
+    if cc_gemini_key:
+        return {
+            "provider": "gemini",
+            "api_key": cc_gemini_key,
+            "base_url": GEMINI_API_BASE,
+            "model": model_env or DEFAULT_GEMINI_MODEL,
+        }
 
     if _LLM_CFG_CACHE is not None:
         return dict(_LLM_CFG_CACHE)
 
-    # 3. Local plugin_data/llm_config.json (set via UI or user file, mode 0600)
+    # 2. Explicit user choice in plugin_data/llm_config.json (takes precedence over generic GEMINI_API_KEY)
     raw = _load_raw_llm_file()
     if raw:
         prov = str(raw.get("provider") or "gemini").strip().lower()
@@ -276,7 +312,9 @@ def resolve_llm_config() -> dict[str, str]:
                     "model": agy_model_env or mdl or DEFAULT_AGY_SUGGEST_MODEL,
                 }
                 return dict(_LLM_CFG_CACHE)
-        elif prov == "openai":
+            _LLM_CFG_CACHE = {"provider": "agy", "api_key": "", "base_url": "", "model": DEFAULT_AGY_SUGGEST_MODEL}
+            return dict(_LLM_CFG_CACHE)
+        if prov == "openai":
             eff_base = base or "https://api.openai.com/v1"
             if not key and _is_local_base_url(eff_base):
                 key = "local"
@@ -288,7 +326,15 @@ def resolve_llm_config() -> dict[str, str]:
                     "model": model_env or mdl or "gpt-4o-mini",
                 }
                 return dict(_LLM_CFG_CACHE)
-        elif key:
+            _LLM_CFG_CACHE = {"provider": "openai", "api_key": "", "base_url": eff_base, "model": "gpt-4o-mini"}
+            return dict(_LLM_CFG_CACHE)
+        if prov == "gemini":
+            if not key:
+                for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                    val = (os.environ.get(env_name) or "").strip()
+                    if val:
+                        key = val
+                        break
             _LLM_CFG_CACHE = {
                 "provider": "gemini",
                 "api_key": key,
@@ -297,37 +343,19 @@ def resolve_llm_config() -> dict[str, str]:
             }
             return dict(_LLM_CFG_CACHE)
 
-    # 4. Fallback to ~/.profile / ~/.bashrc / ~/.zshrc
-    for rc_name in (".profile", ".bashrc", ".zshrc"):
-        rc_path = Path.home() / rc_name
-        if not rc_path.is_file():
-            continue
-        try:
-            for line in rc_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                m = SHELL_GEMINI_KEY_RE.match(line)
-                if m and m.group(2):
-                    _LLM_CFG_CACHE = {
-                        "provider": "gemini",
-                        "api_key": m.group(2).strip(),
-                        "base_url": GEMINI_API_BASE,
-                        "model": model_env or DEFAULT_GEMINI_MODEL,
-                    }
-                    return dict(_LLM_CFG_CACHE)
-        except OSError:
-            continue
-
-    # 5. Out-of-the-box Gemini Subscription fallback via Antigravity CLI (`agy`)
-    if (os.environ.get("CONTEXT_CARD_DISABLE_AGY_AUTO") or "").strip() != "1":
-        agy_bin = find_agy_bin()
-        if agy_bin:
+    # 3. Generic process env vars (GEMINI_API_KEY / GOOGLE_API_KEY)
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        val = (os.environ.get(env_name) or "").strip()
+        if val:
             _LLM_CFG_CACHE = {
-                "provider": "agy",
-                "api_key": "agy-subscription",
-                "base_url": agy_bin,
-                "model": agy_model_env or DEFAULT_AGY_SUGGEST_MODEL,
+                "provider": "gemini",
+                "api_key": val,
+                "base_url": GEMINI_API_BASE,
+                "model": model_env or DEFAULT_GEMINI_MODEL,
             }
             return dict(_LLM_CFG_CACHE)
 
+    # Unconfigured until user explicitly clicks "Use Subscription (agy)" or enters an API key
     _LLM_CFG_CACHE = {"provider": "gemini", "api_key": "", "base_url": GEMINI_API_BASE, "model": DEFAULT_GEMINI_MODEL}
     return dict(_LLM_CFG_CACHE)
 
@@ -346,6 +374,7 @@ def save_llm_config(
     provider: str = "gemini",
     base_url: str = "",
     model: str = "",
+    clear_key: bool = False,
 ) -> bool:
     """Persist auth choice / BYOK credentials locally in plugin_data/llm_config.json (0600)."""
     global _LLM_CFG_CACHE
@@ -354,20 +383,42 @@ def save_llm_config(
     clean_base = (base_url or "").strip().rstrip("/")
     clean_model = (model or "").strip()
 
+    if clear_key:
+        if LLM_CONFIG_PATH.is_file():
+            try:
+                LLM_CONFIG_PATH.unlink()
+            except OSError:
+                pass
+        _LLM_CFG_CACHE = None
+        return has_llm_configured()
+
     existing = _load_raw_llm_file()
-    saved_key = str(existing.get("_saved_api_key") or existing.get("api_key") or "").strip()
+    old_prov = str(existing.get("provider") or "gemini").strip().lower()
+    saved_gemini_key = str(
+        existing.get("_saved_gemini_key")
+        or existing.get("_saved_api_key")
+        or (existing.get("api_key") if old_prov == "gemini" else "")
+        or ""
+    ).strip()
+    saved_openai_key = str(
+        existing.get("_saved_openai_key")
+        or (existing.get("api_key") if old_prov == "openai" else "")
+        or ""
+    ).strip()
     saved_env_file = str(existing.get("_saved_env_file") or existing.get("api_key_env_file") or "").strip()
 
     if prov_raw == "agy":
         data: dict[str, str] = {"provider": "agy"}
         if clean_model:
             data["model"] = clean_model
-        if saved_key:
-            data["_saved_api_key"] = saved_key
+        if saved_gemini_key:
+            data["_saved_gemini_key"] = saved_gemini_key
+        if saved_openai_key:
+            data["_saved_openai_key"] = saved_openai_key
         if saved_env_file:
             data["_saved_env_file"] = saved_env_file
     elif prov_raw == "openai":
-        eff_key = clean_key or saved_key
+        eff_key = clean_key or saved_openai_key
         if not eff_key and not _is_local_base_url(clean_base):
             _LLM_CFG_CACHE = None
             return False
@@ -376,27 +427,24 @@ def save_llm_config(
             data["base_url"] = clean_base
         if clean_model:
             data["model"] = clean_model
+        if saved_gemini_key:
+            data["_saved_gemini_key"] = saved_gemini_key
+        if saved_env_file:
+            data["_saved_env_file"] = saved_env_file
     else:
-        # provider == "gemini": use newly provided key, or restore previously saved key/env_file
         data = {"provider": "gemini"}
         if clean_key:
             data["api_key"] = clean_key
             if saved_env_file:
                 data["_saved_env_file"] = saved_env_file
-        elif saved_key:
-            data["api_key"] = saved_key
+        elif saved_gemini_key:
+            data["api_key"] = saved_gemini_key
             if saved_env_file:
                 data["_saved_env_file"] = saved_env_file
         elif saved_env_file:
             data["api_key_env_file"] = saved_env_file
-        else:
-            if LLM_CONFIG_PATH.is_file():
-                try:
-                    LLM_CONFIG_PATH.unlink()
-                except OSError:
-                    pass
-            _LLM_CFG_CACHE = None
-            return has_llm_configured()
+        if saved_openai_key:
+            data["_saved_openai_key"] = saved_openai_key
         if clean_base:
             data["base_url"] = clean_base
         if clean_model:
@@ -413,6 +461,13 @@ def save_llm_config(
     return has_llm_configured()
 
 
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _call_agy_subscription(
     system_prompt: str,
     user_prompt: str,
@@ -421,24 +476,25 @@ def _call_agy_subscription(
     model: str,
     timeout: float,
 ) -> tuple[str, str, int]:
-    """Invoke `agy -p` headlessly using the user's local Gemini/Antigravity subscription OAuth."""
-    combined = (
-        f"{system_prompt.strip()}\n\n"
-        f"---\n\n"
-        f"{user_prompt.strip()}\n\n"
-        f"IMPORTANT: Do NOT call any tools or inspect any files. "
-        f"Respond ONLY with the raw JSON object matching the schema above."
+    """Invoke `agy -p` headlessly with sandbox + minimal env using local subscription OAuth."""
+    tail_guard = (
+        "IMPORTANT: Do NOT call any tools or inspect any files. "
+        "Respond ONLY with the raw JSON object matching the schema above."
     )
-    if len(combined.encode("utf-8")) > AGY_PROMPT_MAX_BYTES:
-        combined = combined[:60_000]
+    sys_clean = _truncate_utf8_bytes(system_prompt.strip(), 20_000)
+    usr_clean = _truncate_utf8_bytes(user_prompt.strip(), 60_000)
+    combined = f"{sys_clean}\n\n---\n\n{usr_clean}\n\n{tail_guard}"
 
     eff_timeout = max(25, int(round(timeout)))
     candidates = [model]
     if FALLBACK_AGY_SUGGEST_MODEL not in candidates:
         candidates.append(FALLBACK_AGY_SUGGEST_MODEL)
 
-    env = dict(os.environ)
-    env["CONTEXT_CARD_INTERNAL_SUBPROCESS"] = "1"
+    env: dict[str, str] = {"CONTEXT_CARD_INTERNAL_SUBPROCESS": "1"}
+    for k in _AGY_SAFE_ENV_KEYS:
+        val = os.environ.get(k)
+        if val is not None:
+            env[k] = val
 
     last_err: Exception | None = None
     for m in candidates:
@@ -448,6 +504,7 @@ def _call_agy_subscription(
             combined,
             "--model",
             m,
+            "--sandbox",
             "--disable-slash-commands",
             "--print-timeout",
             f"{eff_timeout}s",
@@ -475,9 +532,10 @@ def _call_agy_subscription(
                 )
 
             if proc.returncode != 0:
+                last_err = RuntimeError(f"agy exit {proc.returncode}: {(stderr or stdout)[:100]}")
                 if ("unknown model" in blob_low or "invalid model" in blob_low or "not found" in blob_low) and m != candidates[-1]:
                     continue
-                raise RuntimeError(f"agy exit {proc.returncode}: {(stderr or stdout)[:100]}")
+                raise last_err
 
             if not stdout:
                 raise ValueError("Empty output from agy CLI")
@@ -614,7 +672,7 @@ def call_gemini_json(
             return (text, m, latency_ms)
         except urllib.error.HTTPError as e:
             last_err = e
-            if e.code in (429, 500, 502, 503, 504) and m != candidates[-1]:
+            if e.code in (400, 404, 429, 500, 502, 503, 504) and m != candidates[-1]:
                 continue
             detail = ""
             try:
@@ -633,39 +691,43 @@ def call_gemini_json(
 
 
 def _connect() -> sqlite3.Connection:
+    global _DB_INITIALIZED
+    HABITS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(HABITS_DB_PATH), timeout=2.0)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS profile (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            summary TEXT NOT NULL DEFAULT '',
-            frequent_phrases TEXT NOT NULL DEFAULT '[]',
-            samples_analyzed INTEGER NOT NULL DEFAULT 0,
-            live_feedback_at_distill INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT ''
+    if not _DB_INITIALIZED:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profile (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                summary TEXT NOT NULL DEFAULT '',
+                frequent_phrases TEXT NOT NULL DEFAULT '[]',
+                samples_analyzed INTEGER NOT NULL DEFAULT 0,
+                live_feedback_at_distill INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS examples (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            turn_key TEXT UNIQUE NOT NULL,
-            conversation_id TEXT NOT NULL,
-            workspace TEXT NOT NULL DEFAULT '',
-            assistant_tail TEXT NOT NULL,
-            predicted_primary TEXT NOT NULL DEFAULT '',
-            actual_reply TEXT NOT NULL,
-            outcome TEXT NOT NULL,
-            keywords TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS examples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_key TEXT UNIQUE NOT NULL,
+                conversation_id TEXT NOT NULL,
+                workspace TEXT NOT NULL DEFAULT '',
+                assistant_tail TEXT NOT NULL,
+                predicted_primary TEXT NOT NULL DEFAULT '',
+                actual_reply TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_outcome ON examples(outcome)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_created ON examples(created_at DESC)")
-    conn.commit()
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_outcome ON examples(outcome)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_examples_created ON examples(created_at DESC)")
+        conn.commit()
+        _DB_INITIALIZED = True
     return conn
 
 
@@ -725,6 +787,7 @@ def record_example(
     actual_reply: str,
     outcome: str,
     created_at: str | None = None,
+    expected_epoch: int | None = None,
 ) -> bool:
     """Persist a single feedback or history example. Returns True if newly inserted/updated."""
     actual = (actual_reply or "").strip()
@@ -740,6 +803,8 @@ def record_example(
     rank = {"history": 0, "overridden": 1, "accepted": 2, "edited": 3}
 
     with _DB_LOCK:
+        if expected_epoch is not None and _RESET_EPOCH != expected_epoch:
+            return False
         conn = _connect()
         try:
             row = conn.execute(
@@ -811,9 +876,10 @@ def _iter_interactive_transcripts(limit: int = 24) -> list[tuple[str, Path]]:
 
 def bootstrap_from_history(max_conversations: int = 20, max_examples: int = 120) -> int:
     """Scan recent interactive transcripts and populate initial real user reply pairs."""
+    start_epoch = _RESET_EPOCH
     added = 0
     for cid, tpath in _iter_interactive_transcripts(limit=max_conversations):
-        if added >= max_examples:
+        if added >= max_examples or _RESET_EPOCH != start_epoch:
             break
         try:
             lines = tpath.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -822,12 +888,16 @@ def bootstrap_from_history(max_conversations: int = 20, max_examples: int = 120)
 
         last_assistant: tuple[int, str] | None = None
         for idx, line in enumerate(lines):
+            if _RESET_EPOCH != start_epoch:
+                break
             s = line.strip()
             if not s:
                 continue
             try:
                 r = json.loads(s)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(r, dict):
                 continue
             rtype = r.get("type")
             if (
@@ -836,7 +906,9 @@ def bootstrap_from_history(max_conversations: int = 20, max_examples: int = 120)
                 and (r.get("content") or "").strip()
                 and not (r.get("tool_calls") or [])
             ):
-                last_assistant = (int(r.get("step_index", idx)), (r.get("content") or "").strip())
+                raw_step = r.get("step_index")
+                s_idx = int(raw_step) if isinstance(raw_step, (int, float)) else idx
+                last_assistant = (s_idx, (r.get("content") or "").strip())
             elif rtype == "USER_INPUT" and last_assistant is not None:
                 reply = _clean_user_text(r.get("content") or "")
                 step_idx, asst_text = last_assistant
@@ -854,6 +926,7 @@ def bootstrap_from_history(max_conversations: int = 20, max_examples: int = 120)
                     actual_reply=reply,
                     outcome="history",
                     created_at=r.get("created_at") or datetime.now(tz=timezone.utc).isoformat(),
+                    expected_epoch=start_epoch,
                 ):
                     added += 1
                     if added >= max_examples:
@@ -920,6 +993,7 @@ DISTILL_SYSTEM_PROMPT = """你是一个用户沟通风格分析师。根据用�
 
 def _distill_profile_sync() -> dict[str, Any]:
     global _DISTILL_IN_PROGRESS
+    start_epoch = _RESET_EPOCH
     try:
         with _DB_LOCK:
             conn = _connect()
@@ -992,6 +1066,8 @@ def _distill_profile_sync() -> dict[str, Any]:
         if summary:
             now_iso = datetime.now(tz=timezone.utc).isoformat()
             with _DB_LOCK:
+                if _RESET_EPOCH != start_epoch:
+                    return get_habits_status()
                 conn = _connect()
                 try:
                     conn.execute(
@@ -1021,7 +1097,7 @@ def _distill_profile_sync() -> dict[str, Any]:
 def maybe_schedule_distill(force: bool = False) -> bool:
     """Trigger background profile distillation if forced, missing, or >=6 new live feedbacks."""
     global _DISTILL_IN_PROGRESS
-    if not get_gemini_api_key():
+    if os.environ.get("CONTEXT_CARD_INTERNAL_SUBPROCESS") == "1" or not has_llm_configured():
         return False
 
     should_run = force
@@ -1058,10 +1134,12 @@ def maybe_schedule_distill(force: bool = False) -> bool:
     return True
 
 
-def ensure_initialized_async() -> None:
-    """Once per process, bootstrap historical user replies and schedule initial style distillation."""
+def ensure_initialized_async(auto_suggest_enabled: bool = True) -> None:
+    """Once per process (when enabled & configured), bootstrap replies and schedule style distillation."""
     global _BOOTSTRAPPED
-    if _BOOTSTRAPPED:
+    if _BOOTSTRAPPED or not auto_suggest_enabled:
+        return
+    if os.environ.get("CONTEXT_CARD_INTERNAL_SUBPROCESS") == "1" or not has_llm_configured():
         return
     _BOOTSTRAPPED = True
 
@@ -1096,8 +1174,10 @@ def relearn_now_async() -> dict[str, Any]:
 
 
 def reset_habits() -> dict[str, Any]:
-    """Clear all learned examples and profile."""
+    """Clear all learned examples and profile, invalidating any in-flight workers."""
+    global _RESET_EPOCH
     with _DB_LOCK:
+        _RESET_EPOCH += 1
         conn = _connect()
         try:
             conn.execute("DELETE FROM examples")

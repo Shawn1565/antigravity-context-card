@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
 from pathlib import Path
+
+SAFE_CID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(PLUGIN_ROOT) not in sys.path:
@@ -109,8 +112,14 @@ def main() -> None:
     raw_in = sys.stdin.read()
     payload = json.loads(raw_in) if raw_in.strip() else {}
 
+    tpath_in = str(payload.get("transcriptPath") or "")
+    cwd_in = str(payload.get("cwd") or "")
+    if "antigravity-cli" in tpath_in or cwd_in.startswith("/tmp/"):
+        print("{}")
+        return
+
     cid = str(payload.get("conversationId") or "").strip()
-    if not cid or _is_subagent(cid):
+    if not cid or ".." in cid or not SAFE_CID_RE.match(cid) or _is_subagent(cid):
         print("{}")
         return
 
@@ -125,7 +134,8 @@ def main() -> None:
         ws_path = str(payload.get("cwd") or "").strip()
 
     now = time.time()
-    conn = sqlite3.connect(str(RUNTIME_DB_PATH), timeout=1.2)
+        RUNTIME_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(RUNTIME_DB_PATH), timeout=1.2)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -226,9 +236,10 @@ def main() -> None:
     finally:
         conn.close()
 
+    args_json = json.dumps({"conversation_id": cid})
     msg = (
         f'Context Card auto-bind: call call_mcp_tool(ServerName="context-card_monitor", '
-        f'ToolName="open_context_card", Arguments={{"conversation_id": "{cid}"}}) '
+        f'ToolName="open_context_card", Arguments={args_json}) '
         f"once in parallel with your response or first tool call."
     )
     print(json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": msg}}]}))

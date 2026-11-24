@@ -49,6 +49,8 @@ ACTIVE_CLIENT_TTL_SEC = 5.5
 TRUNCATED_BYTES_RE = re.compile(r"<truncated\s+(\d+)\s+(?:of\s+(\d+)\s+)?bytes[^>]*>")
 USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 ABS_PATH_RE = re.compile(r"(/[\w.\-]+(?:/[\w.\-]+)+)")
+SAFE_CID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
+MAX_CACHE_ENTRIES = 40
 
 # Caches keyed by (cid -> (mtime_ns, size, ws_hint, parsed_dict))
 _TRANSCRIPT_CACHE: dict[str, tuple[int, int, str, dict[str, Any]]] = {}
@@ -65,8 +67,25 @@ _PREFS_CACHE: dict[str, Any] | None = None
 mcp = FastMCP("context-card-monitor")
 
 
+def _sanitize_cid(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s or ".." in s or not SAFE_CID_RE.match(s):
+        return None
+    try:
+        base_resolved = BRAIN_DIR.resolve()
+        cand_resolved = (BRAIN_DIR / s).resolve()
+        if cand_resolved.parent != base_resolved:
+            return None
+    except OSError:
+        return None
+    return s
+
+
 def _open_runtime_db() -> sqlite3.Connection:
     global _RUNTIME_DB_READY
+    RUNTIME_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(RUNTIME_DB_PATH), timeout=1.5)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -274,9 +293,9 @@ def _uri_to_local_path(raw_uri: str | None) -> str | None:
 
 def _resolve_root_conversation_id(cid: str | None) -> str | None:
     """Resolve subagent/child conversation IDs up to their top-level interactive conversation."""
-    cur = (cid or "").strip()
+    cur = _sanitize_cid(cid) or ""
     if not cur or not SUMMARIES_DB.is_file():
-        return cur or None
+        return _sanitize_cid(cur)
     try:
         conn = sqlite3.connect(f"file:{SUMMARIES_DB}?mode=ro", uri=True, timeout=0.5)
         try:
@@ -309,7 +328,7 @@ def _resolve_root_conversation_id(cid: str | None) -> str | None:
             conn.close()
     except Exception:
         pass
-    return cur or None
+    return _sanitize_cid(cur)
 
 
 def _get_summary_workspace_path(cid: str) -> str | None:
@@ -367,7 +386,7 @@ def _extract_meta_conversation_id(ctx: Context | None) -> str | None:
 
 def _get_headless_cli_cids() -> set[str]:
     """Return conversation IDs created by headless `agy -p` CLI invocations."""
-    if habits.AGY_HOME.name == "antigravity-cli" or not SUMMARIES_DB.is_file():
+    if not SUMMARIES_DB.is_file():
         return set()
     out: set[str] = set()
     try:
@@ -389,7 +408,6 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
     """Read top-level interactive conversation metadata from Antigravity's summaries DB (read-only)."""
     if not SUMMARIES_DB.is_file():
         return []
-    is_cli_surface = habits.AGY_HOME.name == "antigravity-cli"
     try:
         conn = sqlite3.connect(f"file:{SUMMARIES_DB}?mode=ro", uri=True, timeout=0.5)
         try:
@@ -407,6 +425,7 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
                 FROM conversation_summaries
                 WHERE (parent_conversation_id IS NULL OR parent_conversation_id = '')
                   AND (killed IS NULL OR killed = 0)
+                  AND (source IS NULL OR source != 'CORTEX_TRAJECTORY_SOURCE_CLI')
                 ORDER BY last_modified_time DESC
                 LIMIT ?
                 """,
@@ -416,16 +435,14 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
             conn.close()
 
         out: list[dict[str, Any]] = []
-        for cid, title, u_ts, m_ts, ws_uris, src in rows:
+        for cid, title, u_ts, m_ts, ws_uris, _src in rows:
             if not cid:
                 continue
             cid_str = str(cid).strip()
             if not cid_str or cid_str in child_ids:
                 continue
-            if not is_cli_surface and str(src or "").strip() == "CORTEX_TRAJECTORY_SOURCE_CLI":
-                continue
             ws_local = _uri_to_local_path(str(ws_uris or "")) or ""
-            if ws_local.startswith("/tmp/ctx_card_agy_") or ws_local.startswith("/tmp/pa_"):
+            if ws_local.startswith("/tmp/"):
                 continue
             u_ep = _parse_iso_ts(str(u_ts or ""))
             m_ep = _parse_iso_ts(str(m_ts or ""))
@@ -813,7 +830,10 @@ def _collect_skills_catalog() -> tuple[int, list[dict[str, Any]]]:
 
 
 def _collect_outputs(cid: str) -> list[dict[str, Any]]:
-    conv_dir = BRAIN_DIR / cid
+    safe_cid = _sanitize_cid(cid)
+    if not safe_cid:
+        return []
+    conv_dir = BRAIN_DIR / safe_cid
     if not conv_dir.is_dir():
         return []
     outputs: list[dict[str, Any]] = []
@@ -856,9 +876,16 @@ def _parse_transcript_cached(
     hint_key = ws_hint or ""
     cached = _TRANSCRIPT_CACHE.get(cid)
     if cached and cached[0] == mtime_ns and cached[1] == size and cached[2] == hint_key:
+        # Refresh LRU order
+        _TRANSCRIPT_CACHE.pop(cid, None)
+        _TRANSCRIPT_CACHE[cid] = cached
         return cached[3]
     data = _parse_transcript(cid, tpath, ws_hint)
+    _TRANSCRIPT_CACHE.pop(cid, None)
     _TRANSCRIPT_CACHE[cid] = (mtime_ns, size, hint_key, data)
+    while len(_TRANSCRIPT_CACHE) > MAX_CACHE_ENTRIES:
+        oldest_key = next(iter(_TRANSCRIPT_CACHE))
+        _TRANSCRIPT_CACHE.pop(oldest_key, None)
     return data
 
 
@@ -1343,6 +1370,7 @@ def _save_prefs(updates: dict[str, Any]) -> dict[str, Any]:
     prefs.update(updates)
     _PREFS_CACHE = dict(prefs)
     try:
+        PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
         PREFS_PATH.write_text(json.dumps(prefs, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
@@ -1483,9 +1511,18 @@ Rules:
 """
 
 
+_QUOTE_PAIRS = {
+    '"': '"',
+    "'": "'",
+    "\u201c": "\u201d",
+    "\u300c": "\u300d",
+    "\u300e": "\u300f",
+}
+
+
 def _strip_outer_quotes(s: str) -> str:
     s = s.strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'", "“", "”", "「", "」"):
+    while len(s) >= 2 and s[0] in _QUOTE_PAIRS and s[-1] == _QUOTE_PAIRS[s[0]]:
         s = s[1:-1].strip()
     return s
 
@@ -1554,6 +1591,8 @@ def _call_suggest_llm(
         timeout=15.0,
     )
     primary, alts = _parse_suggest_json(content)
+    if not primary and alts:
+        primary = alts.pop(0)
     if not primary:
         raise ValueError("Empty primary suggestion returned")
     return (primary, alts, model_used, latency_ms)
@@ -1638,6 +1677,17 @@ def _resolve_suggestion(
     force: bool = False,
 ) -> dict[str, Any]:
     auto_suggest = bool(_load_prefs().get("auto_suggest", True))
+    if os.environ.get("CONTEXT_CARD_INTERNAL_SUBPROCESS") == "1":
+        return {
+            "status": "disabled",
+            "turn_key": "",
+            "primary": "",
+            "alternatives": [],
+            "auto_suggest": False,
+            "model": DEFAULT_SUGGEST_MODEL,
+            "error": None,
+            "latency_ms": None,
+        }
     state = turn_info.get("state", "idle")
     turn_key = turn_info.get("turn_key") or (turn_info.get("latest_reply_turn_key") if force else "")
 
@@ -1710,7 +1760,14 @@ def _resolve_suggestion(
             "latency_ms": None,
             "generated_at": None,
         }
+        _SUGGEST_STATE.pop(cid, None)
         _SUGGEST_STATE[cid] = pending
+        while len(_SUGGEST_STATE) > MAX_CACHE_ENTRIES:
+            oldest_cid = next(iter(_SUGGEST_STATE))
+            _SUGGEST_STATE.pop(oldest_cid, None)
+        while len(_RECENT_PREDICTIONS) > MAX_CACHE_ENTRIES:
+            oldest_pred = next(iter(_RECENT_PREDICTIONS))
+            _RECENT_PREDICTIONS.pop(oldest_pred, None)
 
     t = threading.Thread(
         target=_run_suggestion_worker,
@@ -1728,14 +1785,20 @@ def _build_snapshot(
     exclude_active_panes: bool = False,
     bind_mode_override: str | None = None,
 ) -> dict[str, Any]:
-    explicit_raw = (conversation_id or "").strip() or (_extract_meta_conversation_id(ctx) or "").strip()
+    explicit_raw = _sanitize_cid(conversation_id) or _sanitize_cid(_extract_meta_conversation_id(ctx)) or ""
     if explicit_raw:
         target_id = _resolve_root_conversation_id(explicit_raw) or explicit_raw
         bind_mode = bind_mode_override if bind_mode_override in ("auto", "explicit") else "explicit"
+    elif (conversation_id or "").strip():
+        return {
+            "empty": True,
+            "refreshed_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
     else:
         target_id = _find_latest_conversation_id(exclude_active_panes=exclude_active_panes)
         bind_mode = bind_mode_override if bind_mode_override in ("auto", "explicit") else "auto"
 
+    target_id = _sanitize_cid(target_id)
     if not target_id:
         return {
             "empty": True,
@@ -1744,11 +1807,11 @@ def _build_snapshot(
 
     _active_cids, hook_map = _get_runtime_maps()
     ws_hint = hook_map.get(target_id, ("", 0.0))[0] or _get_summary_workspace_path(target_id)
+    auto_suggest = bool(_load_prefs().get("auto_suggest", True))
 
     tpath = BRAIN_DIR / target_id / ".system_generated" / "logs" / "transcript.jsonl"
     if not tpath.is_file():
         # Brand new conversation whose transcript file hasn't flushed yet
-        auto_suggest = bool(_load_prefs().get("auto_suggest", True))
         env = _detect_workspace([], ws_hint)
         if not env.get("workspace_path"):
             env["workspace_display"] = "Initializing…"
@@ -1798,9 +1861,10 @@ def _build_snapshot(
                 "error": None,
                 "latency_ms": None,
             },
+            "habits": habits.get_habits_status(),
         }
 
-    habits.ensure_initialized_async()
+    habits.ensure_initialized_async(auto_suggest_enabled=auto_suggest)
     st = tpath.stat()
     snapshot = _parse_transcript_cached(target_id, tpath, st.st_mtime_ns, st.st_size, ws_hint)
     turn_info = snapshot.get("_turn_info") or {"state": "idle", "turn_key": "", "latest_reply_turn_key": ""}
@@ -2055,7 +2119,7 @@ def app_record_suggestion_feedback(
     conversation_id: str | None = None,
     ctx: Context | None = None,
 ) -> types.CallToolResult:
-    target_id = (conversation_id or "").strip() or _extract_meta_conversation_id(ctx) or _find_latest_conversation_id() or ""
+    target_id = _sanitize_cid(conversation_id) or _sanitize_cid(_extract_meta_conversation_id(ctx)) or _find_latest_conversation_id() or ""
     assistant_tail = ""
     workspace = ""
     if target_id:
@@ -2063,7 +2127,8 @@ def app_record_suggestion_feedback(
         if cached:
             assistant_tail = cached[3].get("_assistant_tail") or ""
             workspace = (cached[3].get("environment") or {}).get("workspace_name") or ""
-    outcome = "edited" if edited else "accepted"
+    differs_from_primary = bool(predicted_primary.strip() and sent_text.strip() != predicted_primary.strip())
+    outcome = "edited" if (edited or differs_from_primary) else "accepted"
     tkey = (turn_key or "").strip() or f"{target_id}:fb:{int(time.time())}"
     habits.record_example(
         turn_key=tkey,
@@ -2127,13 +2192,20 @@ def app_save_llm_key(
     provider: str = "gemini",
     base_url: str = "",
     model: str = "",
+    clear_key: bool = False,
     conversation_id: str | None = None,
     ctx: Context | None = None,
 ) -> types.CallToolResult:
-    habits.save_llm_config(api_key=api_key, provider=provider, base_url=base_url, model=model)
+    habits.save_llm_config(
+        api_key=api_key,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        clear_key=clear_key,
+    )
     with _SUGGEST_LOCK:
         _SUGGEST_STATE.clear()
-    snap = _build_snapshot(conversation_id, ctx, force_suggest=True)
+    snap = _build_snapshot(conversation_id, ctx, force_suggest=not clear_key)
     return types.CallToolResult(
         content=[types.TextContent(type="text", text="ok")],
         structuredContent=snap,

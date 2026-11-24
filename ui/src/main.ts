@@ -108,13 +108,16 @@ const ToggleAuxPaneResultSchema = z
   .object({ isError: z.boolean().optional() })
   .passthrough();
 
-const app = new App({ name: 'Context Card', version: '1.4.0' }, {});
+const app = new App({ name: 'Context Card', version: '1.1.0' }, {});
 const clientId = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
 let currentSnapshot: ContextSnapshot | null = null;
-// Strictly locked per-window conversation ID (never jumps to other windows)
+// Authoritative conversation ID belonging to the host window (when known)
+let hostConversationId: string | null = null;
+// Strictly locked per-window conversation ID (or user-selected session in picker)
 let lockedConversationId: string | null = null;
 let lockedBindMode: 'explicit' | 'auto' = 'explicit';
+let switchedViaPicker = false;
 let autoRefresh = true;
 let pollInFlight = false;
 let pollTimer: number | null = null;
@@ -140,13 +143,22 @@ let showDrawerKeyInput = false;
 let resetHabitsConfirmUntil = 0;
 let lastSuggestRenderSig = '';
 
-function esc(s: string): string {
-  return s
+function esc(s: unknown): string {
+  if (s == null) return '';
+  return String(s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function canActOnCurrentSession(): boolean {
+  if (!canSendMessage) return false;
+  if (hostConversationId) {
+    return Boolean(lockedConversationId && lockedConversationId === hostConversationId);
+  }
+  return !switchedViaPicker;
 }
 
 function fmtTokens(n: number | undefined): string {
@@ -263,7 +275,7 @@ async function openFileInSidePane(uri: string, name: string) {
 }
 
 async function triggerCompact() {
-  if (!canSendMessage) return;
+  if (!canActOnCurrentSession()) return;
   const now = Date.now();
   if (now > compactConfirmUntil) {
     compactConfirmUntil = now + 4500;
@@ -311,13 +323,13 @@ async function copyText(text: string) {
   }
 }
 
-async function sendSuggestedReply(rawText: string, fromAlt = false) {
+async function sendSuggestedReply(rawText: string, _fromAlt = false) {
   const text = rawText.trim();
-  if (!text || !canSendMessage || sendingSuggestion) return;
+  if (!text || !canActOnCurrentSession() || sendingSuggestion) return;
   sendingSuggestion = true;
   const activeTurnKey = currentSnapshot?.suggestion?.turn_key || draftTurnKey;
   const predictedPrimary = currentSnapshot?.suggestion?.primary || draftPrimarySource || '';
-  const wasEdited = !fromAlt && Boolean(predictedPrimary) && text !== predictedPrimary.trim();
+  const wasEdited = Boolean(predictedPrimary) && text !== predictedPrimary.trim();
   lastSuggestRenderSig = '';
   renderSuggestSection();
   try {
@@ -409,16 +421,16 @@ async function resetHabits() {
   }
 }
 
-async function saveByokKey(rawKey: string, provider = 'gemini') {
+async function saveByokKey(rawKey: string, provider = 'gemini', clearKey = false) {
   const key = rawKey.trim();
-  if (provider === 'gemini' && !key && !currentSnapshot?.habits?.has_saved_api_key) {
+  if (!clearKey && provider === 'gemini' && !key && !currentSnapshot?.habits?.has_saved_api_key) {
     showDrawerKeyInput = true;
     lastSuggestRenderSig = '';
     renderSuggestSection();
     return;
   }
   try {
-    const args: Record<string, string> = { api_key: key, provider };
+    const args: Record<string, unknown> = { api_key: key, provider, clear_key: clearKey };
     if (lockedConversationId) args.conversation_id = lockedConversationId;
     const result = await app.callServerTool({
       name: 'app_save_llm_key',
@@ -428,14 +440,21 @@ async function saveByokKey(rawKey: string, provider = 'gemini') {
     if (sc) {
       showDrawerKeyInput = false;
       applySnapshot(sc);
-      scheduleFastPoll(800);
-      showToast(
-        provider === 'agy'
-          ? 'Switched to Gemini Subscription (agy)'
-          : key
-            ? 'API key saved locally'
-            : 'Switched to saved API key'
-      );
+      const effMode = sc.habits?.auth_mode || 'none';
+      if (effMode !== 'none') {
+        scheduleFastPoll(800);
+      }
+      if (clearKey) {
+        showToast(effMode === 'none' ? 'Cleared saved auth config' : `Cleared saved config (env ${effMode} active)`);
+      } else if (effMode === 'agy') {
+        showToast('Using Gemini Subscription (agy)');
+      } else if (effMode === 'gemini') {
+        showToast(key ? 'API key saved locally' : 'Using Gemini API key');
+      } else if (effMode === 'openai') {
+        showToast('Using OpenAI-compatible endpoint');
+      } else {
+        showToast('No active credential found');
+      }
     }
   } catch {
     showToast('Failed to update auth config');
@@ -574,6 +593,9 @@ async function toggleSessionPicker() {
 async function bindToConversation(cid: string) {
   if (!cid) return;
   sessionPickerOpen = false;
+  if (!hostConversationId && lockedConversationId && cid !== lockedConversationId) {
+    switchedViaPicker = true;
+  }
   lockedConversationId = cid;
   lockedBindMode = 'explicit';
   draftText = '';
@@ -654,6 +676,8 @@ function renderSuggestSection() {
     recent_feedback: [],
   };
 
+  const canAct = canActOnCurrentSession();
+  const isForeignSession = canSendMessage && !canAct;
   const isSent = Boolean(sentTurnKey && s.turn_key && sentTurnKey === s.turn_key);
   const isConfirmingReset = Date.now() < resetHabitsConfirmUntil;
   const sig = JSON.stringify({
@@ -667,7 +691,8 @@ function renderSuggestSection() {
     md: s.model || '',
     se: sendingSuggestion,
     sn: isSent,
-    cs: canSendMessage,
+    cs: canAct,
+    fs: isForeignSession,
     dr: draftDirty ? '__DIRTY__' : draftText,
     he: habitsExpanded,
     sk: showDrawerKeyInput,
@@ -763,7 +788,7 @@ function renderSuggestSection() {
               <div class="alt-row">
                 <button class="alt-pick" data-alt-pick="${idx}" type="button" title="Click to load into box">${esc(alt)}</button>
                 ${
-                  canSendMessage
+                  canAct
                     ? `<button class="alt-send" data-alt-send="${idx}" type="button" title="Send immediately">${iconSvg('send')}</button>`
                     : ''
                 }
@@ -774,6 +799,12 @@ function renderSuggestSection() {
           </div>`
         : '';
 
+    const hintLabel = canAct
+      ? 'Enter to send · Shift+Enter newline'
+      : isForeignSession
+        ? 'Viewing another session · Copy only'
+        : 'Editable draft';
+
     bodyHtml = `
       <div class="suggest-box ${isGen ? 'dimmed' : ''}">
         <textarea
@@ -783,11 +814,11 @@ function renderSuggestSection() {
           placeholder="Suggested next reply…"
         >${esc(draftText)}</textarea>
         <div class="suggest-footer">
-          <span class="suggest-hint">${canSendMessage ? 'Enter to send · Shift+Enter newline' : 'Editable draft'}</span>
+          <span class="suggest-hint">${hintLabel}</span>
           <div class="suggest-btns">
             <button class="copy-btn" data-suggest-action="copy" type="button" title="Copy suggestion">Copy</button>
             ${
-              canSendMessage
+              canAct
                 ? `<button class="send-btn" data-suggest-action="send" type="button" ${sendingSuggestion ? 'disabled' : ''}>${
                     sendingSuggestion ? 'Sending…' : `Send ${iconSvg('send')}`
                   }</button>`
@@ -847,6 +878,11 @@ function renderSuggestSection() {
               }
               <button class="chip-btn ${authMode === 'gemini' ? 'active' : ''}" data-suggest-action="switch-apikey" type="button" title="Use Gemini API Key (faster ~1s direct HTTP)">API Key</button>
               <button class="chip-btn" data-suggest-action="toggle-key-input" type="button" title="Set or update Gemini API key">${showDrawerKeyInput ? 'Cancel' : 'Set Key'}</button>
+              ${
+                h.has_saved_api_key || authMode !== 'none'
+                  ? `<button class="chip-btn" data-suggest-action="clear-key" type="button" title="Clear saved auth config in plugin_data/llm_config.json">Clear</button>`
+                  : ''
+              }
             </div>
           </div>
           ${
@@ -932,7 +968,7 @@ function renderSuggestSection() {
       autoResizeTextarea(ta);
     });
     ta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      if (canActOnCurrentSession() && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         void sendSuggestedReply(ta.value, false);
       }
@@ -970,6 +1006,8 @@ function renderSuggestSection() {
         void saveByokKey('', 'agy');
       } else if (action === 'switch-apikey') {
         void saveByokKey('', 'gemini');
+      } else if (action === 'clear-key') {
+        void saveByokKey('', 'gemini', true);
       } else if (action === 'toggle-key-input') {
         showDrawerKeyInput = !showDrawerKeyInput;
         lastSuggestRenderSig = '';
@@ -1063,7 +1101,13 @@ function render() {
   if (!ctxBody) return;
 
   const snap = currentSnapshot;
-  const env = snap.environment!;
+  const env = snap.environment ?? {
+    host: '-',
+    workspace_name: '-',
+    workspace_path: null,
+    workspace_display: '-',
+    branch: null,
+  };
   const usedPct = snap.used_pct ?? 0;
   const usedTokens = snap.used_tokens ?? 0;
   const limitTokens = snap.limit_tokens ?? 512000;
@@ -1179,7 +1223,7 @@ function render() {
       : `<div class="muted-note">No outputs yet</div>`;
 
   const isConfirmingCompact = Date.now() < compactConfirmUntil;
-  const compactBtn = canSendMessage
+  const compactBtn = canActOnCurrentSession()
     ? `<button class="chip-btn ${isConfirmingCompact ? 'danger' : ''}" data-action="compact" type="button" title="Send /compact to summarize earlier turns">${
         isConfirmingCompact ? 'Confirm /compact?' : '/compact'
       }</button>`
@@ -1362,6 +1406,8 @@ function applyHostContext() {
   if (!ctx) return;
   const hostCid = extractHostConversationId(ctx);
   if (hostCid) {
+    hostConversationId = hostCid;
+    switchedViaPicker = false;
     lockedConversationId = hostCid;
     lockedBindMode = 'explicit';
   }
@@ -1378,11 +1424,13 @@ function applyHostContext() {
 }
 
 // Register handlers BEFORE connect() per MCP Apps spec
-app.ontoolinput = ({ arguments: args }) => {
+app.ontoolinput = ({ arguments: args } = {} as { arguments?: Record<string, unknown> }) => {
   const cid = args && typeof (args as Record<string, unknown>).conversation_id === 'string'
     ? ((args as Record<string, unknown>).conversation_id as string).trim()
     : '';
   if (cid) {
+    hostConversationId = cid;
+    switchedViaPicker = false;
     lockedConversationId = cid;
     lockedBindMode = 'explicit';
   } else if (!lockedConversationId) {
@@ -1395,6 +1443,10 @@ app.ontoolresult = (result) => {
   const sc = (result as { structuredContent?: ContextSnapshot })
     ?.structuredContent;
   if (sc) {
+    if (sc.conversation_id && sc.bind_mode === 'explicit') {
+      hostConversationId = sc.conversation_id;
+      switchedViaPicker = false;
+    }
     applySnapshot(sc, true);
   }
 };
@@ -1406,8 +1458,22 @@ app.ontoolcancelled = () => {
 app.onhostcontextchanged = (ctx) => {
   const hostCid = extractHostConversationId(ctx);
   if (hostCid) {
+    const changed = hostCid !== lockedConversationId;
+    hostConversationId = hostCid;
+    switchedViaPicker = false;
     lockedConversationId = hostCid;
     lockedBindMode = 'explicit';
+    if (changed) {
+      draftText = '';
+      draftTurnKey = '';
+      draftPrimarySource = '';
+      draftDirty = false;
+      sentTurnKey = '';
+      lastSuggestRenderSig = '';
+      void refreshSnapshot(false);
+    } else {
+      render();
+    }
   }
   if (ctx.theme) {
     applyDocumentTheme(ctx.theme);
@@ -1429,16 +1495,23 @@ document.addEventListener('visibilitychange', () => {
 
 async function boot() {
   render();
-  await app.connect();
-  applyHostContext();
-  const caps = app.getHostCapabilities();
-  canSendMessage = Boolean(caps?.message);
-  if (!currentSnapshot) {
-    await refreshSnapshot(false);
-  } else {
-    render();
+  try {
+    await app.connect();
+    applyHostContext();
+    const caps = app.getHostCapabilities();
+    canSendMessage = Boolean(caps?.message);
+    if (!currentSnapshot) {
+      await refreshSnapshot(false);
+    } else {
+      render();
+    }
+    startPolling();
+  } catch {
+    const root = document.getElementById('app');
+    if (root) {
+      root.innerHTML = `<div class="empty-state">Unable to connect to Antigravity host. Reopen the Context pane to retry.</div>`;
+    }
   }
-  startPolling();
 }
 
 void boot();
