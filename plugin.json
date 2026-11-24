@@ -1,7 +1,7 @@
 {
   "name": "context-card",
   "displayName": "Context Card",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Live context window monitor & smart reply plugin for Google Antigravity: HTML side panel for Desktop/IDE, native ANSI statusLine bar for Antigravity CLI, and one-key tmux prompt insertion.",
   "author": {
     "name": "Shawn1565",
