@@ -102,6 +102,10 @@ def _rules_bytes_near_budget(ws_path: str) -> bool:
 
 
 def main() -> None:
+    if os.environ.get("CONTEXT_CARD_INTERNAL_SUBPROCESS") == "1":
+        print("{}")
+        return
+
     raw_in = sys.stdin.read()
     payload = json.loads(raw_in) if raw_in.strip() else {}
 

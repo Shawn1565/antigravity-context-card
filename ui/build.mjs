@@ -873,6 +873,26 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+.habits-auth-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.habits-auth-label {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.habits-auth-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
 .habits-model {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10.5px;

@@ -27,9 +27,10 @@ Unlike generic context meters that lump everything into `Messages`, **Context Ca
 - **Quick Actions & File Preview**:
   - Two-click `/compact` trigger directly from the panel.
   - Clickable **Memory files**, **Loaded skills**, and conversation **Outputs** (artifacts) that open directly in Antigravity's side-pane file viewer.
-- **Optional BYOK Suggested Replies + Local Style Learning**:
-  - Works **100% offline with zero API keys** for all context monitoring features.
-  - Optionally connect your own **Gemini API Key** (Google AI Studio free tier works great) or any **OpenAI-compatible endpoint** (Ollama, OpenRouter, DeepSeek, OpenAI) to get one-click next-reply drafts that locally learn your phrasing and brevity over time.
+- **Zero-Config Suggested Replies (Gemini Subscription + BYOK)**:
+  - Works **100% offline** for all context monitoring features.
+  - **Out-of-the-box Gemini Subscription Auth**: Automatically reuses your local Antigravity CLI (`agy`) Google subscription OAuth—no API key required!
+  - **Optional BYOK (~1s ultra-low latency)**: Also supports your own **Gemini API Key** (Google AI Studio free tier works great) or any **OpenAI-compatible endpoint** (Ollama, OpenRouter, DeepSeek, OpenAI), with one-click switching inside the `Habits` drawer.
 
 ### Quick Install
 
@@ -44,18 +45,21 @@ Unlike generic context meters that lump everything into `Messages`, **Context Ca
    ```
 3. Antigravity discovers plugins automatically. Start a new chat (or click `+ -> Context` in the right side panel) and Context Card will appear!
 
-### Optional: Configure Suggested Replies (BYOK)
+### Suggested Replies Auth (Gemini Subscription or BYOK)
 
-Context monitoring requires **no API key**. To enable smart next-reply suggestions, choose any one of the following:
+Context monitoring requires **no authentication or network**. For smart next-reply suggestions, **4 modes** are supported (switchable anytime inside `Habits` in the UI):
 
-- **Option A — Paste directly in the UI**: Click the password box in the `Suggested reply` card and hit **Save**. Your key is stored locally with `0600` permissions at `~/.gemini/antigravity/plugin_data/context-card/llm_config.json` (never inside the plugin folder).
-- **Option B — Environment variable** (in `~/.zshrc` / `~/.bashrc`):
+- **Option A — Gemini Subscription via `agy` CLI (Zero-Config Default)**:
+  If you have the official Antigravity CLI (`agy`) installed and signed in (`agy` in terminal once), Context Card automatically uses your existing Gemini subscription (`gemini-3.8-flash-low`) with **zero API keys**.
+- **Option B — Paste a Gemini API Key in the UI (~1s fastest response)**:
+  Open `Habits` -> `Set Key` (or paste in the setup card) and click **Save**. Stored locally with `0600` permissions at `~/.gemini/antigravity/plugin_data/context-card/llm_config.json` (never inside the plugin folder).
+- **Option C — Environment variable** (in `~/.zshrc` / `~/.bashrc`):
   ```bash
   export GEMINI_API_KEY="AIza..."
-  # Optional custom model (default: gemini-2.5-flash)
-  export CONTEXT_CARD_SUGGEST_MODEL="gemini-2.5-flash"
+  # Or force subscription mode even when GEMINI_API_KEY is set:
+  # export CONTEXT_CARD_PROVIDER="agy"
   ```
-- **Option C — OpenAI-compatible / Local Ollama**:
+- **Option D — OpenAI-compatible / Local Ollama**:
   ```bash
   export CONTEXT_CARD_OPENAI_BASE_URL="http://localhost:11434/v1"
   export CONTEXT_CARD_SUGGEST_MODEL="qwen2.5:7b"
@@ -101,9 +105,10 @@ npm run build
 - **快捷交互与文件直达**：
   - 面板内双击确认即可发送 `/compact` 压缩上下文。
   - 点击面板中的规则文件、已加载 Skill 或会话产物（Outputs），直接在侧边栏预览对应文件。
-- **可选的 BYOK 智能建议回复 + 本地习惯学习**：
-  - **上下文监控主功能 100% 离线运行，无需任何 API Key**。
-  - 可选接入你自己的 **Gemini API Key**（Google AI Studio 免费额度即可流畅使用）或任意 **OpenAI 兼容接口**（本地 Ollama、OpenRouter、DeepSeek、OpenAI），根据你的历史回复自动学习你的表达风格与简短习惯，提供一键发送/改写的下一句建议。
+- **免配置智能建议回复（支持 Gemini 订阅鉴权 + BYOK）**：
+  - **上下文监控主功能 100% 离线运行**。
+  - **原生复用 Gemini 订阅（免 API Key）**：若本机已安装并登录官方 `agy`（Antigravity CLI），插件会自动复用你的 Gemini 订阅 OAuth 鉴权生成建议回复，零密钥开箱即用！
+  - **支持一键切换 API Key / 本地模型**：也可在面板 `Habits` 抽屉内一键切换为自己的 **Gemini API Key**（直连响应约 1 秒）或任意 **OpenAI 兼容接口**（本地 Ollama、OpenRouter、DeepSeek、OpenAI），并在本地自动学习你的表达习惯。
 
 ### 快速安装
 
@@ -118,19 +123,21 @@ npm run build
    ```
 3. Antigravity 会自动发现并加载插件。新建对话（或点击右侧边栏 `+ -> Context`）即可使用！
 
-### 可选配置：智能建议回复（BYOK 自带密钥）
+### 智能建议回复鉴权配置（Gemini 订阅或自带密钥）
 
-如果不配置 Key，所有上下文监控功能完全正常可用。如需开启底部的 `Suggested reply`，任选以下一种方式即可：
+上下文监控无需任何网络或鉴权。底部的 `Suggested reply` 支持以下 **4 种接入方式**（可在面板 `Habits` 抽屉内随时一键切换 `Subscription (agy)` 与 `API Key`）：
 
-- **方式一：在面板内直接填写（最简单）**
-  在面板底部 `Suggested reply` 区域的输入框粘贴你的 Gemini API Key 并点击 **Save**。密钥会以 `0600` 仅本人可读权限保存在插件目录之外的 `~/.gemini/antigravity/plugin_data/context-card/llm_config.json`，绝不会混入代码目录。
-- **方式二：环境变量配置**（写入 `~/.zshrc` 或 `~/.bashrc`）
+- **方式一：直接复用 Gemini 订阅（默认免配置）**
+  只要本机已安装并登录 Antigravity 官方 CLI（终端执行过一次 `agy` 登录），插件会自动通过 `agy` 订阅通道调用 `gemini-3.8-flash-low`，**无需申请任何 API Key**。
+- **方式二：在面板内填写 Gemini API Key（约 1 秒极速直连）**
+  展开 `Habits` 点击 **Set Key**（或在首次提示框粘贴）并保存。密钥以 `0600` 权限保存在仓库外的 `~/.gemini/antigravity/plugin_data/context-card/llm_config.json`，绝不混入代码目录。
+- **方式三：环境变量配置**（写入 `~/.zshrc` 或 `~/.bashrc`）
   ```bash
   export GEMINI_API_KEY="AIza..."
-  # 可选：自定义模型（默认 gemini-2.5-flash）
-  export CONTEXT_CARD_SUGGEST_MODEL="gemini-2.5-flash"
+  # 若同时配了环境变量但想强制走订阅通道：
+  # export CONTEXT_CARD_PROVIDER="agy"
   ```
-- **方式三：接入本地 Ollama 或任意 OpenAI 兼容接口**
+- **方式四：接入本地 Ollama 或任意 OpenAI 兼容接口**
   ```bash
   export CONTEXT_CARD_OPENAI_BASE_URL="http://localhost:11434/v1"
   export CONTEXT_CARD_SUGGEST_MODEL="qwen2.5:7b"

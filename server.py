@@ -365,10 +365,31 @@ def _extract_meta_conversation_id(ctx: Context | None) -> str | None:
     return None
 
 
+def _get_headless_cli_cids() -> set[str]:
+    """Return conversation IDs created by headless `agy -p` CLI invocations."""
+    if habits.AGY_HOME.name == "antigravity-cli" or not SUMMARIES_DB.is_file():
+        return set()
+    out: set[str] = set()
+    try:
+        conn = sqlite3.connect(f"file:{SUMMARIES_DB}?mode=ro", uri=True, timeout=0.4)
+        try:
+            for (cid,) in conn.execute(
+                "SELECT conversation_id FROM conversation_summaries WHERE source = 'CORTEX_TRAJECTORY_SOURCE_CLI'"
+            ).fetchall():
+                if cid:
+                    out.add(str(cid).strip())
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
+
+
 def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
     """Read top-level interactive conversation metadata from Antigravity's summaries DB (read-only)."""
     if not SUMMARIES_DB.is_file():
         return []
+    is_cli_surface = habits.AGY_HOME.name == "antigravity-cli"
     try:
         conn = sqlite3.connect(f"file:{SUMMARIES_DB}?mode=ro", uri=True, timeout=0.5)
         try:
@@ -382,7 +403,7 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
 
             rows = conn.execute(
                 """
-                SELECT conversation_id, title, last_user_input_time, last_modified_time, workspace_uris
+                SELECT conversation_id, title, last_user_input_time, last_modified_time, workspace_uris, source
                 FROM conversation_summaries
                 WHERE (parent_conversation_id IS NULL OR parent_conversation_id = '')
                   AND (killed IS NULL OR killed = 0)
@@ -395,11 +416,16 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
             conn.close()
 
         out: list[dict[str, Any]] = []
-        for cid, title, u_ts, m_ts, ws_uris in rows:
+        for cid, title, u_ts, m_ts, ws_uris, src in rows:
             if not cid:
                 continue
             cid_str = str(cid).strip()
             if not cid_str or cid_str in child_ids:
+                continue
+            if not is_cli_surface and str(src or "").strip() == "CORTEX_TRAJECTORY_SOURCE_CLI":
+                continue
+            ws_local = _uri_to_local_path(str(ws_uris or "")) or ""
+            if ws_local.startswith("/tmp/ctx_card_agy_") or ws_local.startswith("/tmp/pa_"):
                 continue
             u_ep = _parse_iso_ts(str(u_ts or ""))
             m_ep = _parse_iso_ts(str(m_ts or ""))
@@ -411,7 +437,7 @@ def _query_sidebar_summaries(limit: int = 30) -> list[dict[str, Any]]:
                     "last_modified_time": str(m_ts or ""),
                     "user_ts": u_ep,
                     "mod_ts": m_ep,
-                    "workspace_path": _uri_to_local_path(str(ws_uris or "")) or "",
+                    "workspace_path": ws_local,
                 }
             )
         out.sort(key=lambda it: max(it["user_ts"], it["mod_ts"]), reverse=True)
@@ -462,10 +488,13 @@ def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | No
         score = max(float(item["user_ts"]), float(item["mod_ts"]), mtime_ep, hook_ep)
         candidates[cid] = max(candidates.get(cid, 0.0), score)
 
+    cli_cids = _get_headless_cli_cids()
     for cid, (_ws, hook_ep) in hook_map.items():
         if hook_ep <= 0:
             continue
         root_cid = _resolve_root_conversation_id(cid) or cid
+        if root_cid in cli_cids:
+            continue
         tpath = BRAIN_DIR / root_cid / ".system_generated" / "logs" / "transcript.jsonl"
         mtime_ep = 0.0
         try:
@@ -485,6 +514,8 @@ def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | No
                 except OSError:
                     continue
                 root_cid = _resolve_root_conversation_id(entry.name) or entry.name
+                if root_cid in cli_cids:
+                    continue
                 candidates[root_cid] = max(candidates.get(root_cid, 0.0), st.st_mtime)
         except OSError:
             pass
@@ -1563,6 +1594,21 @@ def _run_suggestion_worker(
                 if len(preds) > 20:
                     oldest = next(iter(preds))
                     preds.pop(oldest, None)
+    except habits.AgyAuthRequiredError as exc:
+        with _SUGGEST_LOCK:
+            cur = _SUGGEST_STATE.get(cid)
+            if cur and cur.get("turn_key") == turn_key and cur.get("req_seq") == req_seq:
+                _SUGGEST_STATE[cid] = {
+                    "turn_key": turn_key,
+                    "req_seq": req_seq,
+                    "status": "needs_key",
+                    "primary": "",
+                    "alternatives": [],
+                    "model": DEFAULT_SUGGEST_MODEL,
+                    "error": str(exc)[:140],
+                    "latency_ms": None,
+                    "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
     except Exception as exc:
         err_msg = str(exc)
         if len(err_msg) > 120:
@@ -1649,7 +1695,7 @@ def _resolve_suggestion(
 
     with _SUGGEST_LOCK:
         cur = _SUGGEST_STATE.get(cid)
-        if not force and cur and cur.get("turn_key") == turn_key and cur.get("status") in ("generating", "ready", "error"):
+        if not force and cur and cur.get("turn_key") == turn_key and cur.get("status") in ("generating", "ready", "error", "needs_key"):
             return {**cur, "auto_suggest": auto_suggest}
 
         req_seq = int((cur or {}).get("req_seq") or 0) + 1
@@ -1923,6 +1969,7 @@ def _list_recent_conversations(limit: int = 10) -> list[dict[str, Any]]:
 
     if not BRAIN_DIR.is_dir():
         return []
+    cli_cids = _get_headless_cli_cids()
     items: list[tuple[int, str, Path]] = []
     seen_roots: set[str] = set()
     try:
@@ -1930,7 +1977,7 @@ def _list_recent_conversations(limit: int = 10) -> list[dict[str, Any]]:
             if not entry.is_dir() or entry.name == "tempmediaStorage":
                 continue
             root_cid = _resolve_root_conversation_id(entry.name) or entry.name
-            if root_cid != entry.name or root_cid in seen_roots:
+            if root_cid != entry.name or root_cid in seen_roots or root_cid in cli_cids:
                 continue
             tpath = entry / ".system_generated" / "logs" / "transcript.jsonl"
             try:
@@ -2071,12 +2118,12 @@ def app_reset_habits(
 
 @mcp.tool(
     name="app_save_llm_key",
-    title="Save BYOK Suggestion API Key",
-    description="Internal app-only tool to persist a local BYOK API key in plugin_data/llm_config.json (0600).",
+    title="Save Suggestion LLM Auth Config",
+    description="Internal app-only tool to switch between Gemini Subscription (`agy`) and BYOK API key in plugin_data/llm_config.json (0600).",
     meta=APP_ONLY_META,
 )
 def app_save_llm_key(
-    api_key: str,
+    api_key: str = "",
     provider: str = "gemini",
     base_url: str = "",
     model: str = "",

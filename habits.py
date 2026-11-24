@@ -12,7 +12,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -88,7 +91,44 @@ SUMMARIES_DB = AGY_HOME / "conversation_summaries.db"
 
 DEFAULT_GEMINI_MODEL = os.environ.get("CONTEXT_CARD_SUGGEST_MODEL", "gemini-2.5-flash")
 FALLBACK_GEMINI_MODEL = "gemini-flash-lite-latest"
+DEFAULT_AGY_SUGGEST_MODEL = os.environ.get("CONTEXT_CARD_AGY_MODEL", "gemini-3.8-flash-low")
+FALLBACK_AGY_SUGGEST_MODEL = "Gemini 4 Neon (Low)"
+AGY_PROMPT_MAX_BYTES = 100_000
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+class AgyAuthRequiredError(RuntimeError):
+    """Raised when `agy` CLI is installed but not signed in with Google subscription OAuth."""
+
+
+def find_agy_bin() -> str | None:
+    """Locate the Antigravity CLI (`agy`) binary across Linux, macOS, and Windows."""
+    env_bin = (os.environ.get("CONTEXT_CARD_AGY_BIN") or "").strip()
+    if env_bin:
+        p = Path(env_bin).expanduser()
+        if p.is_file() and os.access(str(p), os.X_OK):
+            return str(p)
+    which_hit = shutil.which("agy")
+    if which_hit:
+        return which_hit
+    home = Path.home()
+    candidates = [
+        home / ".local" / "bin" / "agy",
+        Path("/usr/local/bin/agy"),
+        Path("/opt/homebrew/bin/agy"),
+        home / "bin" / "agy",
+        home / ".local" / "bin" / "agy.exe",
+    ]
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        candidates.append(Path(local_app) / "Programs" / "agy" / "agy.exe")
+    for cand in candidates:
+        try:
+            if cand.is_file() and os.access(str(cand), os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return None
 
 USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 SHELL_GEMINI_KEY_RE = re.compile(
@@ -133,16 +173,62 @@ def _is_local_base_url(url: str) -> bool:
     return low.startswith("http://localhost") or low.startswith("http://127.0.0.1") or low.startswith("http://[::1]")
 
 
+def _load_raw_llm_file() -> dict[str, Any]:
+    try:
+        if LLM_CONFIG_PATH.is_file():
+            raw = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception:
+        pass
+    return {}
+
+
+def has_saved_gemini_key() -> bool:
+    for env_name in ("CONTEXT_CARD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        if (os.environ.get(env_name) or "").strip():
+            return True
+    raw = _load_raw_llm_file()
+    if str(raw.get("api_key") or raw.get("_saved_api_key") or "").strip():
+        return True
+    env_file = str(raw.get("api_key_env_file") or raw.get("_saved_env_file") or "").strip()
+    if env_file and _read_key_from_env_file(env_file):
+        return True
+    for rc_name in (".profile", ".bashrc", ".zshrc"):
+        rc_path = Path.home() / rc_name
+        if rc_path.is_file():
+            try:
+                for line in rc_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    m = SHELL_GEMINI_KEY_RE.match(line)
+                    if m and m.group(2):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
 def resolve_llm_config() -> dict[str, str]:
-    """Resolve BYOK LLM credentials from env vars, plugin_data/llm_config.json, or shell rc."""
+    """Resolve LLM auth from env vars, plugin_data/llm_config.json, shell rc, or agy subscription."""
     global _LLM_CFG_CACHE
 
-    # 1. Explicit OpenAI-compatible env vars (OpenRouter, DeepSeek, OpenAI, local Ollama/vLLM)
     oa_base = (os.environ.get("CONTEXT_CARD_OPENAI_BASE_URL") or "").strip()
     oa_key = (os.environ.get("CONTEXT_CARD_OPENAI_API_KEY") or "").strip()
     provider_env = (os.environ.get("CONTEXT_CARD_PROVIDER") or "").strip().lower()
     model_env = (os.environ.get("CONTEXT_CARD_SUGGEST_MODEL") or "").strip()
+    agy_model_env = (os.environ.get("CONTEXT_CARD_AGY_MODEL") or "").strip()
 
+    # 1a. Explicit Antigravity CLI (Gemini Subscription OAuth) via env
+    if provider_env == "agy":
+        agy_bin = find_agy_bin()
+        if agy_bin:
+            return {
+                "provider": "agy",
+                "api_key": "agy-subscription",
+                "base_url": agy_bin,
+                "model": agy_model_env or model_env or DEFAULT_AGY_SUGGEST_MODEL,
+            }
+
+    # 1b. Explicit OpenAI-compatible env vars (OpenRouter, DeepSeek, OpenAI, local Ollama/vLLM)
     if oa_base or provider_env == "openai":
         base = (oa_base or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
         key = oa_key or (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -156,53 +242,60 @@ def resolve_llm_config() -> dict[str, str]:
                 "model": model_env or "gpt-4o-mini",
             }
 
-    # 2. Standard Gemini env vars
-    for env_name in ("CONTEXT_CARD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
-        val = (os.environ.get(env_name) or "").strip()
-        if val:
-            return {
-                "provider": "gemini",
-                "api_key": val,
-                "base_url": GEMINI_API_BASE,
-                "model": model_env or DEFAULT_GEMINI_MODEL,
-            }
+    # 2. Standard Gemini API key env vars
+    if provider_env != "agy":
+        for env_name in ("CONTEXT_CARD_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            val = (os.environ.get(env_name) or "").strip()
+            if val:
+                return {
+                    "provider": "gemini",
+                    "api_key": val,
+                    "base_url": GEMINI_API_BASE,
+                    "model": model_env or DEFAULT_GEMINI_MODEL,
+                }
 
     if _LLM_CFG_CACHE is not None:
         return dict(_LLM_CFG_CACHE)
 
     # 3. Local plugin_data/llm_config.json (set via UI or user file, mode 0600)
-    try:
-        if LLM_CONFIG_PATH.is_file():
-            raw = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                prov = str(raw.get("provider") or "gemini").strip().lower()
-                key = str(raw.get("api_key") or "").strip()
-                if not key and raw.get("api_key_env_file"):
-                    key = _read_key_from_env_file(str(raw.get("api_key_env_file")))
-                base = str(raw.get("base_url") or "").strip().rstrip("/")
-                mdl = model_env or str(raw.get("model") or "").strip()
-                if prov == "openai":
-                    eff_base = base or "https://api.openai.com/v1"
-                    if not key and _is_local_base_url(eff_base):
-                        key = "local"
-                    if key:
-                        _LLM_CFG_CACHE = {
-                            "provider": "openai",
-                            "api_key": key,
-                            "base_url": eff_base,
-                            "model": mdl or "gpt-4o-mini",
-                        }
-                        return dict(_LLM_CFG_CACHE)
-                elif key:
-                    _LLM_CFG_CACHE = {
-                        "provider": "gemini",
-                        "api_key": key,
-                        "base_url": base or GEMINI_API_BASE,
-                        "model": mdl or DEFAULT_GEMINI_MODEL,
-                    }
-                    return dict(_LLM_CFG_CACHE)
-    except Exception:
-        pass
+    raw = _load_raw_llm_file()
+    if raw:
+        prov = str(raw.get("provider") or "gemini").strip().lower()
+        key = str(raw.get("api_key") or "").strip()
+        if not key and raw.get("api_key_env_file"):
+            key = _read_key_from_env_file(str(raw.get("api_key_env_file")))
+        base = str(raw.get("base_url") or "").strip().rstrip("/")
+        mdl = str(raw.get("model") or "").strip()
+        if prov == "agy":
+            agy_bin = find_agy_bin()
+            if agy_bin:
+                _LLM_CFG_CACHE = {
+                    "provider": "agy",
+                    "api_key": "agy-subscription",
+                    "base_url": agy_bin,
+                    "model": agy_model_env or mdl or DEFAULT_AGY_SUGGEST_MODEL,
+                }
+                return dict(_LLM_CFG_CACHE)
+        elif prov == "openai":
+            eff_base = base or "https://api.openai.com/v1"
+            if not key and _is_local_base_url(eff_base):
+                key = "local"
+            if key:
+                _LLM_CFG_CACHE = {
+                    "provider": "openai",
+                    "api_key": key,
+                    "base_url": eff_base,
+                    "model": model_env or mdl or "gpt-4o-mini",
+                }
+                return dict(_LLM_CFG_CACHE)
+        elif key:
+            _LLM_CFG_CACHE = {
+                "provider": "gemini",
+                "api_key": key,
+                "base_url": base or GEMINI_API_BASE,
+                "model": model_env or mdl or DEFAULT_GEMINI_MODEL,
+            }
+            return dict(_LLM_CFG_CACHE)
 
     # 4. Fallback to ~/.profile / ~/.bashrc / ~/.zshrc
     for rc_name in (".profile", ".bashrc", ".zshrc"):
@@ -223,6 +316,18 @@ def resolve_llm_config() -> dict[str, str]:
         except OSError:
             continue
 
+    # 5. Out-of-the-box Gemini Subscription fallback via Antigravity CLI (`agy`)
+    if (os.environ.get("CONTEXT_CARD_DISABLE_AGY_AUTO") or "").strip() != "1":
+        agy_bin = find_agy_bin()
+        if agy_bin:
+            _LLM_CFG_CACHE = {
+                "provider": "agy",
+                "api_key": "agy-subscription",
+                "base_url": agy_bin,
+                "model": agy_model_env or DEFAULT_AGY_SUGGEST_MODEL,
+            }
+            return dict(_LLM_CFG_CACHE)
+
     _LLM_CFG_CACHE = {"provider": "gemini", "api_key": "", "base_url": GEMINI_API_BASE, "model": DEFAULT_GEMINI_MODEL}
     return dict(_LLM_CFG_CACHE)
 
@@ -232,37 +337,70 @@ def has_llm_configured() -> bool:
 
 
 def get_gemini_api_key() -> str:
-    """Backward-compatible helper returning the active API key (if any)."""
+    """Backward-compatible helper returning the active credential sentinel/key (if any)."""
     return resolve_llm_config().get("api_key") or ""
 
 
 def save_llm_config(
-    api_key: str,
+    api_key: str = "",
     provider: str = "gemini",
     base_url: str = "",
     model: str = "",
 ) -> bool:
-    """Persist BYOK credentials locally in plugin_data/llm_config.json (0600)."""
+    """Persist auth choice / BYOK credentials locally in plugin_data/llm_config.json (0600)."""
     global _LLM_CFG_CACHE
-    prov = "openai" if (provider or "").strip().lower() == "openai" else "gemini"
+    prov_raw = (provider or "gemini").strip().lower()
     clean_key = (api_key or "").strip()
     clean_base = (base_url or "").strip().rstrip("/")
     clean_model = (model or "").strip()
 
-    if not clean_key and not (prov == "openai" and _is_local_base_url(clean_base)):
-        if LLM_CONFIG_PATH.is_file():
-            try:
-                LLM_CONFIG_PATH.unlink()
-            except OSError:
-                pass
-        _LLM_CFG_CACHE = None
-        return False
+    existing = _load_raw_llm_file()
+    saved_key = str(existing.get("_saved_api_key") or existing.get("api_key") or "").strip()
+    saved_env_file = str(existing.get("_saved_env_file") or existing.get("api_key_env_file") or "").strip()
 
-    data: dict[str, str] = {"provider": prov, "api_key": clean_key}
-    if clean_base:
-        data["base_url"] = clean_base
-    if clean_model:
-        data["model"] = clean_model
+    if prov_raw == "agy":
+        data: dict[str, str] = {"provider": "agy"}
+        if clean_model:
+            data["model"] = clean_model
+        if saved_key:
+            data["_saved_api_key"] = saved_key
+        if saved_env_file:
+            data["_saved_env_file"] = saved_env_file
+    elif prov_raw == "openai":
+        eff_key = clean_key or saved_key
+        if not eff_key and not _is_local_base_url(clean_base):
+            _LLM_CFG_CACHE = None
+            return False
+        data = {"provider": "openai", "api_key": eff_key}
+        if clean_base:
+            data["base_url"] = clean_base
+        if clean_model:
+            data["model"] = clean_model
+    else:
+        # provider == "gemini": use newly provided key, or restore previously saved key/env_file
+        data = {"provider": "gemini"}
+        if clean_key:
+            data["api_key"] = clean_key
+            if saved_env_file:
+                data["_saved_env_file"] = saved_env_file
+        elif saved_key:
+            data["api_key"] = saved_key
+            if saved_env_file:
+                data["_saved_env_file"] = saved_env_file
+        elif saved_env_file:
+            data["api_key_env_file"] = saved_env_file
+        else:
+            if LLM_CONFIG_PATH.is_file():
+                try:
+                    LLM_CONFIG_PATH.unlink()
+                except OSError:
+                    pass
+            _LLM_CFG_CACHE = None
+            return has_llm_configured()
+        if clean_base:
+            data["base_url"] = clean_base
+        if clean_model:
+            data["model"] = clean_model
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = LLM_CONFIG_PATH.with_suffix(".tmp")
@@ -275,6 +413,90 @@ def save_llm_config(
     return has_llm_configured()
 
 
+def _call_agy_subscription(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    agy_bin: str,
+    model: str,
+    timeout: float,
+) -> tuple[str, str, int]:
+    """Invoke `agy -p` headlessly using the user's local Gemini/Antigravity subscription OAuth."""
+    combined = (
+        f"{system_prompt.strip()}\n\n"
+        f"---\n\n"
+        f"{user_prompt.strip()}\n\n"
+        f"IMPORTANT: Do NOT call any tools or inspect any files. "
+        f"Respond ONLY with the raw JSON object matching the schema above."
+    )
+    if len(combined.encode("utf-8")) > AGY_PROMPT_MAX_BYTES:
+        combined = combined[:60_000]
+
+    eff_timeout = max(25, int(round(timeout)))
+    candidates = [model]
+    if FALLBACK_AGY_SUGGEST_MODEL not in candidates:
+        candidates.append(FALLBACK_AGY_SUGGEST_MODEL)
+
+    env = dict(os.environ)
+    env["CONTEXT_CARD_INTERNAL_SUBPROCESS"] = "1"
+
+    last_err: Exception | None = None
+    for m in candidates:
+        argv = [
+            agy_bin,
+            "-p",
+            combined,
+            "--model",
+            m,
+            "--disable-slash-commands",
+            "--print-timeout",
+            f"{eff_timeout}s",
+        ]
+        t0 = time.monotonic()
+        try:
+            with tempfile.TemporaryDirectory(prefix="ctx_card_agy_") as tmpd:
+                proc = subprocess.run(
+                    argv,
+                    cwd=tmpd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=eff_timeout + 10,
+                    check=False,
+                )
+            latency_ms = int(round((time.monotonic() - t0) * 1000))
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            blob_low = f"{stdout}\n{stderr}".lower()
+
+            if "please sign in" in blob_low or "not logged in" in blob_low or ("sign in" in blob_low and proc.returncode != 0):
+                raise AgyAuthRequiredError(
+                    "Run `agy` in terminal once to sign in with your Gemini subscription, or paste an API key."
+                )
+
+            if proc.returncode != 0:
+                if ("unknown model" in blob_low or "invalid model" in blob_low or "not found" in blob_low) and m != candidates[-1]:
+                    continue
+                raise RuntimeError(f"agy exit {proc.returncode}: {(stderr or stdout)[:100]}")
+
+            if not stdout:
+                raise ValueError("Empty output from agy CLI")
+            return (stdout, f"agy:{m}", latency_ms)
+        except AgyAuthRequiredError:
+            raise
+        except subprocess.TimeoutExpired as e:
+            last_err = RuntimeError(f"agy timed out (>{eff_timeout}s)")
+            if m != candidates[-1]:
+                continue
+            raise last_err from e
+        except Exception as e:
+            last_err = e
+            if m != candidates[-1]:
+                continue
+            raise
+    raise last_err or RuntimeError("agy subscription call failed")
+
+
 def call_gemini_json(
     system_prompt: str,
     user_prompt: str,
@@ -284,11 +506,24 @@ def call_gemini_json(
     model: str | None = None,
     timeout: float = 15.0,
 ) -> tuple[str, str, int]:
-    """Call configured BYOK model (Gemini native or OpenAI-compatible) and return (text, model_used, latency_ms)."""
+    """Call configured LLM (Gemini API, Antigravity `agy` subscription, or OpenAI-compatible)."""
     cfg = resolve_llm_config()
     api_key = cfg.get("api_key") or ""
     if not api_key:
         raise RuntimeError("API key not configured")
+
+    if cfg.get("provider") == "agy":
+        agy_bin = cfg.get("base_url") or find_agy_bin()
+        if not agy_bin:
+            raise RuntimeError("Antigravity CLI (`agy`) not found")
+        target_agy_model = (model or cfg.get("model") or DEFAULT_AGY_SUGGEST_MODEL).strip()
+        return _call_agy_subscription(
+            system_prompt,
+            user_prompt,
+            agy_bin=agy_bin,
+            model=target_agy_model,
+            timeout=max(timeout, 28.0),
+        )
 
     if cfg.get("provider") == "openai":
         base_url = (cfg.get("base_url") or "https://api.openai.com/v1").rstrip("/")
@@ -552,7 +787,9 @@ def _iter_interactive_transcripts(limit: int = 24) -> list[tuple[str, Path]]:
                 rows = conn.execute(
                     """
                     SELECT conversation_id FROM conversation_summaries
-                    WHERE title != '' AND (parent_conversation_id IS NULL OR parent_conversation_id = '')
+                    WHERE title != ''
+                      AND (parent_conversation_id IS NULL OR parent_conversation_id = '')
+                      AND (source IS NULL OR source != 'CORTEX_TRAJECTORY_SOURCE_CLI')
                     ORDER BY last_user_input_time DESC, last_modified_time DESC
                     LIMIT ?
                     """,
@@ -980,6 +1217,9 @@ def get_habits_status() -> dict[str, Any]:
         except Exception:
             phrases = []
 
+    cfg = resolve_llm_config()
+    auth_mode = cfg.get("provider") if cfg.get("api_key") else "none"
+
     return {
         "total_samples": total,
         "history_samples": int(counts.get("history", 0)),
@@ -988,6 +1228,10 @@ def get_habits_status() -> dict[str, Any]:
         "overridden_count": overridden,
         "accept_rate_pct": accept_rate,
         "distilling": _DISTILL_IN_PROGRESS,
+        "auth_mode": auth_mode,
+        "active_model": cfg.get("model") or DEFAULT_GEMINI_MODEL,
+        "agy_available": bool(find_agy_bin()),
+        "has_saved_api_key": has_saved_gemini_key(),
         "profile_summary": (prof[0] if prof else "") or "",
         "frequent_phrases": phrases[:8],
         "profile_updated_at": (prof[3] if prof else "") or "",

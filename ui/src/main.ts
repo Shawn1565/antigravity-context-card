@@ -52,6 +52,10 @@ interface HabitsData {
   overridden_count: number;
   accept_rate_pct: number | null;
   distilling: boolean;
+  auth_mode?: 'agy' | 'gemini' | 'openai' | 'none';
+  active_model?: string;
+  agy_available?: boolean;
+  has_saved_api_key?: boolean;
   profile_summary: string;
   frequent_phrases: string[];
   profile_updated_at: string;
@@ -132,6 +136,7 @@ let draftPrimarySource = '';
 let sendingSuggestion = false;
 let sentTurnKey = '';
 let habitsExpanded = false;
+let showDrawerKeyInput = false;
 let resetHabitsConfirmUntil = 0;
 let lastSuggestRenderSig = '';
 
@@ -404,14 +409,16 @@ async function resetHabits() {
   }
 }
 
-async function saveByokKey(rawKey: string) {
+async function saveByokKey(rawKey: string, provider = 'gemini') {
   const key = rawKey.trim();
-  if (!key) {
-    showToast('Please paste an API key');
+  if (provider === 'gemini' && !key && !currentSnapshot?.habits?.has_saved_api_key) {
+    showDrawerKeyInput = true;
+    lastSuggestRenderSig = '';
+    renderSuggestSection();
     return;
   }
   try {
-    const args: Record<string, string> = { api_key: key };
+    const args: Record<string, string> = { api_key: key, provider };
     if (lockedConversationId) args.conversation_id = lockedConversationId;
     const result = await app.callServerTool({
       name: 'app_save_llm_key',
@@ -419,12 +426,19 @@ async function saveByokKey(rawKey: string) {
     });
     const sc = (result as { structuredContent?: ContextSnapshot })?.structuredContent;
     if (sc) {
+      showDrawerKeyInput = false;
       applySnapshot(sc);
       scheduleFastPoll(800);
-      showToast('API key saved locally');
+      showToast(
+        provider === 'agy'
+          ? 'Switched to Gemini Subscription (agy)'
+          : key
+            ? 'API key saved locally'
+            : 'Switched to saved API key'
+      );
     }
   } catch {
-    showToast('Failed to save API key');
+    showToast('Failed to update auth config');
   }
 }
 
@@ -656,6 +670,10 @@ function renderSuggestSection() {
     cs: canSendMessage,
     dr: draftDirty ? '__DIRTY__' : draftText,
     he: habitsExpanded,
+    sk: showDrawerKeyInput,
+    am: h.auth_mode || '',
+    ag: Boolean(h.agy_available),
+    hk: Boolean(h.has_saved_api_key),
     hr: isConfirmingReset,
     hs: h.total_samples,
     hd: h.distilling,
@@ -704,11 +722,18 @@ function renderSuggestSection() {
       </div>
     `;
   } else if (s.status === 'needs_key') {
+    const agyNote = s.error
+      ? esc(s.error)
+      : 'Use your Gemini subscription (via Antigravity CLI) or paste a Gemini API key:';
+    const agyBtn = h.agy_available
+      ? `<button class="chip-btn active" data-suggest-action="use-agy" type="button" title="Use local Antigravity CLI (agy) Google subscription OAuth">Use Subscription (agy)</button>`
+      : '';
     bodyHtml = `
       <div class="byok-box">
-        <div class="byok-note">Optional: paste a Gemini API key (or set <code>GEMINI_API_KEY</code>) to enable smart reply suggestions.</div>
+        <div class="byok-note">${agyNote}</div>
+        ${agyBtn ? `<div class="byok-row">${agyBtn}</div>` : ''}
         <div class="byok-row">
-          <input id="byok-key-input" class="byok-input" type="password" autocomplete="off" placeholder="AIza… (stored locally, 0600)" />
+          <input id="byok-key-input" class="byok-input" type="password" autocomplete="off" placeholder="AIza… Gemini API Key (0600)" />
           <button class="chip-btn" data-suggest-action="save-key" type="button">Save</button>
         </div>
       </div>
@@ -809,13 +834,37 @@ function renderSuggestSection() {
         const statsParts = [`${h.total_samples} samples`];
         if (h.accept_rate_pct !== null) statsParts.push(`${h.accept_rate_pct}% hit`);
         if (h.edited_count > 0) statsParts.push(`${h.edited_count} edits`);
-        const modelShort = (s.model || 'gemini-2.5-flash').replace(/^models\//, '');
+        const modelShort = (h.active_model || s.model || 'gemini-2.5-flash').replace(/^models\//, '');
+        const authMode = h.auth_mode || 'none';
+        const authRowHtml = `
+          <div class="habits-auth-row">
+            <span class="habits-auth-label">Auth:</span>
+            <div class="habits-auth-pills">
+              ${
+                h.agy_available
+                  ? `<button class="chip-btn ${authMode === 'agy' ? 'active' : ''}" data-suggest-action="use-agy" type="button" title="Use Antigravity CLI (agy) Gemini subscription OAuth — no API key needed">Subscription (agy)</button>`
+                  : ''
+              }
+              <button class="chip-btn ${authMode === 'gemini' ? 'active' : ''}" data-suggest-action="switch-apikey" type="button" title="Use Gemini API Key (faster ~1s direct HTTP)">API Key</button>
+              <button class="chip-btn" data-suggest-action="toggle-key-input" type="button" title="Set or update Gemini API key">${showDrawerKeyInput ? 'Cancel' : 'Set Key'}</button>
+            </div>
+          </div>
+          ${
+            showDrawerKeyInput
+              ? `<div class="byok-row">
+                   <input id="drawer-key-input" class="byok-input" type="password" autocomplete="off" placeholder="AIza… (stored locally in plugin_data)" />
+                   <button class="chip-btn" data-suggest-action="save-drawer-key" type="button">Save</button>
+                 </div>`
+              : ''
+          }
+        `;
         return `
           <div class="habits-drawer">
             <div class="habits-stats">
               <span>${esc(statsParts.join(' · '))}</span>
-              <span class="habits-model">${esc(modelShort)}</span>
+              <span class="habits-model">${esc(authMode === 'agy' ? `agy · ${modelShort.replace(/^agy:/, '')}` : modelShort)}</span>
             </div>
+            ${authRowHtml}
             <div class="habits-profile">
               ${
                 h.distilling
@@ -913,7 +962,18 @@ function renderSuggestSection() {
         void sendSuggestedReply(cur, false);
       } else if (action === 'save-key') {
         const inp = host.querySelector<HTMLInputElement>('#byok-key-input');
-        void saveByokKey(inp?.value ?? '');
+        void saveByokKey(inp?.value ?? '', 'gemini');
+      } else if (action === 'save-drawer-key') {
+        const inp = host.querySelector<HTMLInputElement>('#drawer-key-input');
+        void saveByokKey(inp?.value ?? '', 'gemini');
+      } else if (action === 'use-agy') {
+        void saveByokKey('', 'agy');
+      } else if (action === 'switch-apikey') {
+        void saveByokKey('', 'gemini');
+      } else if (action === 'toggle-key-input') {
+        showDrawerKeyInput = !showDrawerKeyInput;
+        lastSuggestRenderSig = '';
+        renderSuggestSection();
       }
     };
   });
@@ -923,7 +983,16 @@ function renderSuggestSection() {
     keyInp.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        void saveByokKey(keyInp.value);
+        void saveByokKey(keyInp.value, 'gemini');
+      }
+    });
+  }
+  const drawerKeyInp = host.querySelector<HTMLInputElement>('#drawer-key-input');
+  if (drawerKeyInp) {
+    drawerKeyInp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void saveByokKey(drawerKeyInp.value, 'gemini');
       }
     });
   }
