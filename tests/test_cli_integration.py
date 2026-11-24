@@ -364,5 +364,120 @@ class TestModelLimits(unittest.TestCase):
         self.assertEqual(core.format_model(None), ("Unknown model", 512_000))
 
 
+class TestServerLifeAndPreInvocation(unittest.TestCase):
+    def test_import_server_does_not_clobber_server_life_and_hook_handles_stale_pid(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            data_dir = home / ".gemini" / "antigravity" / "plugin_data" / "context-card"
+            data_dir.mkdir(parents=True)
+            db_path = data_dir / "runtime_state.db"
+            live_pid = os.getpid()
+            dead_pid = 999_999_999
+            cid = "11111111-2222-3333-4444-555555555555"
+
+            conn = sqlite3.connect(str(db_path))
+            conn.executescript(
+                """
+                CREATE TABLE server_life (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    pid INTEGER NOT NULL,
+                    started_at REAL NOT NULL,
+                    unconfirmed_auto_ts REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE session_bindings (
+                    cid TEXT PRIMARY KEY,
+                    workspace_path TEXT NOT NULL DEFAULT '',
+                    hook_seen_ts REAL NOT NULL DEFAULT 0,
+                    explicit_server_pid INTEGER NOT NULL DEFAULT 0,
+                    explicit_bound_ts REAL NOT NULL DEFAULT 0,
+                    hook_reminded_ts REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE pane_clients (
+                    client_id TEXT PRIMARY KEY,
+                    cid TEXT NOT NULL,
+                    bind_mode TEXT NOT NULL DEFAULT 'explicit',
+                    updated_ts REAL NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO server_life (id, pid, started_at, unconfirmed_auto_ts) VALUES (1, ?, ?, 0)",
+                (dead_pid, time.time() - 600),
+            )
+            conn.execute(
+                "INSERT INTO session_bindings (cid, explicit_server_pid, explicit_bound_ts) VALUES (?, ?, ?)",
+                (cid, live_pid, time.time() - 300),
+            )
+            conn.commit()
+            conn.close()
+
+            import site
+
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("ANTIGRAVITY_APP_DATA_DIR", "CONTEXT_CARD_DATA_DIR", "PLUGIN_DATA")
+            }
+            env["HOME"] = str(home)
+            env["ANTIGRAVITY_APP_DATA_DIR"] = str(home / ".gemini" / "antigravity")
+            user_site = site.getusersitepackages()
+            env["PYTHONPATH"] = f"{user_site}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else user_site
+            # 1. Importing server must NOT overwrite server_life.pid
+            subprocess.run(
+                [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(PLUGIN_ROOT)!r}); import server"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute("SELECT pid FROM server_life WHERE id = 1").fetchone()
+            conn.close()
+            self.assertEqual(row[0], dead_pid)
+
+            # 2. pre_invocation must NOT re-inject when explicit_server_pid is still alive even if server_life.pid died
+            payload = {
+                "conversationId": cid,
+                "invocationNum": 1,
+                "initialNumSteps": 10,
+                "cwd": str(home),
+                "workspacePaths": [str(home)],
+            }
+            res = subprocess.run(
+                [sys.executable, str(PLUGIN_ROOT / "hooks" / "pre_invocation.py")],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                env=env,
+                check=True,
+            )
+            self.assertEqual(res.stdout.strip(), "{}")
+
+            # 3. Active server handling an explicit open self-heals a dead server_life.pid
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os, sys; sys.path.insert(0, {str(PLUGIN_ROOT)!r}); import server; server._record_explicit_open({cid!r}); print(os.getpid())",
+                ],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            healed_pid = int(proc.stdout.strip())
+            conn = sqlite3.connect(str(db_path))
+            row2 = conn.execute("SELECT pid FROM server_life WHERE id = 1").fetchone()
+            conn.close()
+            self.assertEqual(row2[0], healed_pid)
+
+    def test_dist_app_html_has_back_to_chat_and_detached_hint(self) -> None:
+        html = (PLUGIN_ROOT / "dist" / "app.html").read_text(encoding="utf-8")
+        self.assertIn("Back to chat", html)
+        self.assertIn("Detached pane", html)
+
+
 if __name__ == "__main__":
     unittest.main()

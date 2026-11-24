@@ -114,6 +114,8 @@ const clientId = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toStri
 let currentSnapshot: ContextSnapshot | null = null;
 // Authoritative conversation ID belonging to the host window (when known)
 let hostConversationId: string | null = null;
+// Initial conversation ID matched in Auto mode before any picker switch
+let initialAutoConversationId: string | null = null;
 // Strictly locked per-window conversation ID (or user-selected session in picker)
 let lockedConversationId: string | null = null;
 let lockedBindMode: 'explicit' | 'auto' = 'explicit';
@@ -151,6 +153,10 @@ function esc(s: unknown): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function getReturnHostConversationId(): string | null {
+  return hostConversationId || initialAutoConversationId;
 }
 
 function canActOnCurrentSession(): boolean {
@@ -526,6 +532,9 @@ function applySnapshot(sc: ContextSnapshot, forceBind = false) {
     lockedConversationId = sc.conversation_id;
     if (forceBind || firstLock) {
       lockedBindMode = sc.bind_mode === 'auto' ? 'auto' : 'explicit';
+      if (!hostConversationId && !initialAutoConversationId && lockedBindMode === 'auto') {
+        initialAutoConversationId = sc.conversation_id;
+      }
     }
   } else if (sc.bind_mode === 'explicit' && sc.conversation_id === lockedConversationId) {
     lockedBindMode = 'explicit';
@@ -593,8 +602,13 @@ async function toggleSessionPicker() {
 async function bindToConversation(cid: string) {
   if (!cid) return;
   sessionPickerOpen = false;
-  if (!hostConversationId && lockedConversationId && cid !== lockedConversationId) {
-    switchedViaPicker = true;
+  if (!hostConversationId) {
+    if (!initialAutoConversationId && lockedConversationId) {
+      initialAutoConversationId = lockedConversationId;
+    }
+    switchedViaPicker = Boolean(initialAutoConversationId && cid !== initialAutoConversationId);
+  } else {
+    switchedViaPicker = cid !== hostConversationId;
   }
   lockedConversationId = cid;
   lockedBindMode = 'explicit';
@@ -678,6 +692,7 @@ function renderSuggestSection() {
 
   const canAct = canActOnCurrentSession();
   const isForeignSession = canSendMessage && !canAct;
+  const returnHostCid = isForeignSession ? getReturnHostConversationId() : null;
   const isSent = Boolean(sentTurnKey && s.turn_key && sentTurnKey === s.turn_key);
   const isConfirmingReset = Date.now() < resetHabitsConfirmUntil;
   const sig = JSON.stringify({
@@ -693,6 +708,7 @@ function renderSuggestSection() {
     sn: isSent,
     cs: canAct,
     fs: isForeignSession,
+    rc: returnHostCid || '',
     dr: draftDirty ? '__DIRTY__' : draftText,
     he: habitsExpanded,
     sk: showDrawerKeyInput,
@@ -803,7 +819,7 @@ function renderSuggestSection() {
       ? 'Enter to send · Shift+Enter newline'
       : isForeignSession
         ? 'Viewing another session · Copy only'
-        : 'Editable draft';
+        : 'Detached pane · Copy only (open via chat to Send)';
 
     bodyHtml = `
       <div class="suggest-box ${isGen ? 'dimmed' : ''}">
@@ -816,6 +832,11 @@ function renderSuggestSection() {
         <div class="suggest-footer">
           <span class="suggest-hint">${hintLabel}</span>
           <div class="suggest-btns">
+            ${
+              returnHostCid
+                ? `<button class="chip-btn" data-suggest-action="return-host" type="button" title="Switch back to this window's chat to re-enable Send">Back to chat</button>`
+                : ''
+            }
             <button class="copy-btn" data-suggest-action="copy" type="button" title="Copy suggestion">Copy</button>
             ${
               canAct
@@ -993,6 +1014,9 @@ function renderSuggestSection() {
       } else if (action === 'copy') {
         const cur = host.querySelector<HTMLTextAreaElement>('#suggest-textarea')?.value ?? draftText;
         void copyText(cur);
+      } else if (action === 'return-host') {
+        const target = getReturnHostConversationId();
+        if (target) void bindToConversation(target);
       } else if (action === 'send') {
         const cur = host.querySelector<HTMLTextAreaElement>('#suggest-textarea')?.value ?? draftText;
         void sendSuggestedReply(cur, false);
@@ -1407,6 +1431,7 @@ function applyHostContext() {
   const hostCid = extractHostConversationId(ctx);
   if (hostCid) {
     hostConversationId = hostCid;
+    initialAutoConversationId = null;
     switchedViaPicker = false;
     lockedConversationId = hostCid;
     lockedBindMode = 'explicit';
@@ -1430,6 +1455,7 @@ app.ontoolinput = ({ arguments: args } = {} as { arguments?: Record<string, unkn
     : '';
   if (cid) {
     hostConversationId = cid;
+    initialAutoConversationId = null;
     switchedViaPicker = false;
     lockedConversationId = cid;
     lockedBindMode = 'explicit';
@@ -1445,6 +1471,7 @@ app.ontoolresult = (result) => {
   if (sc) {
     if (sc.conversation_id && sc.bind_mode === 'explicit') {
       hostConversationId = sc.conversation_id;
+      initialAutoConversationId = null;
       switchedViaPicker = false;
     }
     applySnapshot(sc, true);
@@ -1460,6 +1487,7 @@ app.onhostcontextchanged = (ctx) => {
   if (hostCid) {
     const changed = hostCid !== lockedConversationId;
     hostConversationId = hostCid;
+    initialAutoConversationId = null;
     switchedViaPicker = false;
     lockedConversationId = hostCid;
     lockedBindMode = 'explicit';

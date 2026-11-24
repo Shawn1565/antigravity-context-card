@@ -76,6 +76,44 @@ def _sanitize_cid(raw: str | None) -> str | None:
     return s
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_server_life_row(conn: sqlite3.Connection, *, force: bool = False) -> None:
+    """Register this running server's PID in server_life (or self-heal if stale/dead)."""
+    if not force:
+        row = conn.execute("SELECT pid FROM server_life WHERE id = 1").fetchone()
+        if row:
+            cur_pid = int(row[0] or 0)
+            if cur_pid == SERVER_PID or _pid_alive(cur_pid):
+                return
+    conn.execute(
+        """
+        INSERT INTO server_life (id, pid, started_at, unconfirmed_auto_ts)
+        VALUES (1, ?, ?, 0)
+        ON CONFLICT(id) DO UPDATE SET
+            pid = excluded.pid,
+            started_at = excluded.started_at,
+            unconfirmed_auto_ts = CASE
+                WHEN server_life.pid = excluded.pid THEN server_life.unconfirmed_auto_ts
+                ELSE 0
+            END
+        """,
+        (SERVER_PID, SERVER_STARTED_AT),
+    )
+
+
 def _open_runtime_db() -> sqlite3.Connection:
     global _RUNTIME_DB_READY
     RUNTIME_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -107,35 +145,23 @@ def _open_runtime_db() -> sqlite3.Connection:
             );
             """
         )
-        conn.execute(
-            """
-            INSERT INTO server_life (id, pid, started_at, unconfirmed_auto_ts)
-            VALUES (1, ?, ?, 0)
-            ON CONFLICT(id) DO UPDATE SET
-                pid = excluded.pid,
-                started_at = excluded.started_at,
-                unconfirmed_auto_ts = CASE
-                    WHEN server_life.pid = excluded.pid THEN server_life.unconfirmed_auto_ts
-                    ELSE 0
-                END
-            """,
-            (SERVER_PID, SERVER_STARTED_AT),
-        )
         conn.commit()
         _RUNTIME_DB_READY = True
     return conn
 
 
 def _init_runtime_state() -> None:
+    """Register active MCP server process (called only from __main__, never on import)."""
     try:
         with _RUNTIME_DB_LOCK:
             conn = _open_runtime_db()
-            conn.close()
+            try:
+                _ensure_server_life_row(conn, force=True)
+                conn.commit()
+            finally:
+                conn.close()
     except Exception:
         pass
-
-
-_init_runtime_state()
 
 
 def _record_explicit_open(cid: str) -> None:
@@ -146,6 +172,7 @@ def _record_explicit_open(cid: str) -> None:
         with _RUNTIME_DB_LOCK:
             conn = _open_runtime_db()
             try:
+                _ensure_server_life_row(conn, force=False)
                 conn.execute(
                     """
                     INSERT INTO session_bindings (cid, explicit_server_pid, explicit_bound_ts)
@@ -170,6 +197,7 @@ def _record_manual_auto_open() -> None:
         with _RUNTIME_DB_LOCK:
             conn = _open_runtime_db()
             try:
+                _ensure_server_life_row(conn, force=False)
                 conn.execute(
                     "UPDATE server_life SET unconfirmed_auto_ts = ? WHERE id = 1",
                     (now,),
@@ -191,6 +219,7 @@ def _record_client_heartbeat(client_id: str | None, cid: str, bind_mode: str) ->
         with _RUNTIME_DB_LOCK:
             conn = _open_runtime_db()
             try:
+                _ensure_server_life_row(conn, force=False)
                 conn.execute(
                     """
                     INSERT INTO pane_clients (client_id, cid, bind_mode, updated_ts)
@@ -1276,4 +1305,5 @@ def context_card_html() -> str:
 
 
 if __name__ == "__main__":
+    _init_runtime_state()
     mcp.run(transport="stdio")

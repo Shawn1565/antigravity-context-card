@@ -187,7 +187,10 @@ def main() -> None:
             is not None
         )
 
-        opened_in_cur_life = srv_alive and srv_pid > 0 and (explicit_srv_pid == srv_pid)
+        opened_in_cur_life = (
+            (srv_alive and srv_pid > 0 and (explicit_srv_pid == srv_pid))
+            or (not srv_alive and explicit_srv_pid > 0 and _pid_alive(explicit_srv_pid))
+        )
         pending_manual_rebind = (
             unconfirmed_auto_ts > 0.0
             and (now - unconfirmed_auto_ts) <= 300.0
