@@ -1,0 +1,27 @@
+# Python & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Node build dependencies (pre-built dist/app.html IS tracked for zero-build install)
+ui/node_modules/
+
+# Local runtime state, databases, and user secrets/preferences
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+.prefs.json
+prefs.json
+llm_config.json
+.runtime_state*
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~

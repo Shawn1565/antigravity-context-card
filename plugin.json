@@ -1,0 +1,21 @@
+{
+  "name": "context-card",
+  "displayName": "Context Card",
+  "version": "1.1.0",
+  "description": "Live Claude Desktop-style context window monitor for Google Antigravity: tracks token breakdown (Messages, Thinking, Tool I/O), cache hit rate, checkpoints, /compact, and BYOK reply suggestions.",
+  "author": {
+    "name": "Shawn1565",
+    "url": "https://github.com/Shawn1565"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shawn1565/antigravity-context-card.git"
+  },
+  "homepage": "https://github.com/Shawn1565/antigravity-context-card",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the Context Card in the side panel",
+    "Show my current context window token breakdown",
+    "Check how much context space is left before compaction"
+  ]
+}
