@@ -8,12 +8,22 @@
 [English](#english) | [中文说明](#中文说明)
 
 <p align="center">
-  <img src="./assets/desktop-preview.png" alt="Antigravity Context Card — Desktop 2.0 Side Panel" width="330" />
+  <img src="./assets/demo-walkthrough.gif" alt="Antigravity Context Card — Animated Walkthrough (Desktop 2.0 + CLI + tmux)" width="880" />
 </p>
 
+<details>
+<summary>📸 Static high-res screenshots (Full Window · Side Panel · CLI &amp; tmux)</summary>
+<br />
+<p align="center">
+  <img src="./assets/full-window-preview.png" alt="Antigravity 2.0 Full Window with Context Card Side Panel" width="880" />
+</p>
+<p align="center">
+  <img src="./assets/desktop-preview.png" alt="Antigravity Context Card — Desktop 2.0 Side Panel" width="330" />
+</p>
 <p align="center">
   <img src="./assets/cli-preview.png" alt="Antigravity Context Card — CLI statusLine & tmux one-key fill" width="760" />
 </p>
+</details>
 
 ---
 
