@@ -562,6 +562,13 @@ class TestServerLifeAndPreInvocation(unittest.TestCase):
         html = (PLUGIN_ROOT / "dist" / "app.html").read_text(encoding="utf-8")
         self.assertIn("Back to chat", html)
         self.assertIn("Detached pane", html)
+        self.assertIn("toggle-outputs", html)
+        self.assertIn("Suggested reply settings", html)
+        self.assertNotIn("Confirm /compact?", html)
+        self.assertNotIn("Sent /compact to conversation", html)
+        self.assertNotIn(">Habits</button>", html)
+        self.assertNotIn(" samples", html)
+        self.assertNotIn("habit-fb-list", html)
 
 
 class TestManualOpenWindowDetection(unittest.TestCase):

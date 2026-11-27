@@ -127,9 +127,9 @@ let pollTimer: number | null = null;
 let fastPollTimer: number | null = null;
 let memoryExpanded = false;
 let skillsExpanded = false;
+let outputsExpanded = false;
 let sessionPickerOpen = false;
 let recentConversations: ConversationOption[] = [];
-let compactConfirmUntil = 0;
 let canSendMessage = false;
 let toastMessage: string | null = null;
 let toastTimer: number | null = null;
@@ -251,6 +251,8 @@ function iconSvg(kind: string, extraCls = ''): string {
       return `<svg class="${cls('ico')}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><circle cx="5.75" cy="6" r="1"/><path d="m2.5 11.5 3.25-3 2.5 2.25 2-1.75 3.25 2.5"/></svg>`;
     case 'refresh':
       return `<svg class="${cls('ico-xs')}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.35-3.6"/><path d="M13.5 2.75v2.75h-2.75"/></svg>`;
+    case 'settings':
+      return `<svg class="${cls('ico-sm')}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>`;
     default:
       return `<svg class="${cls('ico')}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.75h5.25L12.5 5v9.25H4a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1Z"/><path d="M9.25 1.75V5h3.25"/></svg>`;
   }
@@ -279,30 +281,6 @@ async function openFileInSidePane(uri: string, name: string) {
   } catch {
     showToast(`File preview unavailable here`);
   }
-}
-
-async function triggerCompact() {
-  if (!canActOnCurrentSession()) return;
-  const now = Date.now();
-  if (now > compactConfirmUntil) {
-    compactConfirmUntil = now + 4500;
-    render();
-    window.setTimeout(() => {
-      if (Date.now() >= compactConfirmUntil) render();
-    }, 4600);
-    return;
-  }
-  compactConfirmUntil = 0;
-  try {
-    await app.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: '/compact' }],
-    });
-    showToast('Sent /compact to conversation');
-  } catch {
-    showToast('Could not send /compact');
-  }
-  render();
 }
 
 async function copyText(text: string) {
@@ -855,43 +833,10 @@ function renderSuggestSection() {
 
   const habitsDrawerHtml = habitsExpanded
     ? (() => {
-        const phrasesHtml =
-          h.frequent_phrases.length > 0
-            ? `<div class="habit-phrases">${h.frequent_phrases
-                .map((p) => `<span class="habit-pill">${esc(p)}</span>`)
-                .join('')}</div>`
-            : '';
-        const fbHtml =
-          h.recent_feedback.length > 0
-            ? `<div class="habit-fb-list">
-                ${h.recent_feedback
-                  .slice(0, 3)
-                  .map((f) => {
-                    const tag =
-                      f.outcome === 'edited'
-                        ? '改写'
-                        : f.outcome === 'accepted'
-                          ? '采纳'
-                          : '手打';
-                    const cls =
-                      f.outcome === 'edited'
-                        ? 'fb-edit'
-                        : f.outcome === 'accepted'
-                          ? 'fb-ok'
-                          : 'fb-ov';
-                    return `<div class="habit-fb-row"><span class="fb-tag ${cls}">${tag}</span><span class="fb-text" title="${esc(f.actual)}">${esc(f.actual)}</span></div>`;
-                  })
-                  .join('')}
-              </div>`
-            : '';
-        const statsParts = [`${h.total_samples} samples`];
-        if (h.accept_rate_pct !== null) statsParts.push(`${h.accept_rate_pct}% hit`);
-        if (h.edited_count > 0) statsParts.push(`${h.edited_count} edits`);
-        const modelShort = (h.active_model || s.model || 'gemini-2.5-flash').replace(/^models\//, '');
         const authMode = h.auth_mode || 'none';
         const authRowHtml = `
           <div class="habits-auth-row">
-            <span class="habits-auth-label">Auth:</span>
+            <span class="habits-auth-label">Auth</span>
             <div class="habits-auth-pills">
               ${
                 h.agy_available
@@ -902,7 +847,7 @@ function renderSuggestSection() {
               <button class="chip-btn" data-suggest-action="toggle-key-input" type="button" title="Set or update Gemini API key">${showDrawerKeyInput ? 'Cancel' : 'Set Key'}</button>
               ${
                 h.has_saved_api_key || authMode !== 'none'
-                  ? `<button class="chip-btn" data-suggest-action="clear-key" type="button" title="Clear saved auth config in plugin_data/llm_config.json">Clear</button>`
+                  ? `<button class="chip-btn" data-suggest-action="clear-key" type="button" title="Clear saved auth config">Clear</button>`
                   : ''
               }
             </div>
@@ -910,7 +855,7 @@ function renderSuggestSection() {
           ${
             showDrawerKeyInput
               ? `<div class="byok-row">
-                   <input id="drawer-key-input" class="byok-input" type="password" autocomplete="off" placeholder="AIza… (stored locally in plugin_data)" />
+                   <input id="drawer-key-input" class="byok-input" type="password" autocomplete="off" placeholder="AIza… (stored locally)" />
                    <button class="chip-btn" data-suggest-action="save-drawer-key" type="button">Save</button>
                  </div>`
               : ''
@@ -918,29 +863,17 @@ function renderSuggestSection() {
         `;
         return `
           <div class="habits-drawer">
-            <div class="habits-stats">
-              <span>${esc(statsParts.join(' · '))}</span>
-              <span class="habits-model">${esc(authMode === 'agy' ? `agy · ${modelShort.replace(/^agy:/, '')}` : modelShort)}</span>
-            </div>
             ${authRowHtml}
-            <div class="habits-profile">
-              ${
-                h.distilling
-                  ? `<span class="muted-note">Distilling style profile from your chats…</span>`
-                  : h.profile_summary
-                    ? esc(h.profile_summary)
-                    : `<span class="muted-note">No style profile yet — click Re-learn to analyze recent chats.</span>`
-              }
-            </div>
-            ${phrasesHtml}
-            ${fbHtml}
-            <div class="habits-actions">
-              <button class="chip-btn" data-suggest-action="relearn-habits" type="button" ${h.distilling ? 'disabled' : ''}>
-                ${h.distilling ? 'Learning…' : 'Re-learn'}
-              </button>
-              <button class="chip-btn ${isConfirmingReset ? 'danger' : ''}" data-suggest-action="reset-habits" type="button">
-                ${isConfirmingReset ? 'Confirm reset?' : 'Reset'}
-              </button>
+            <div class="habits-auth-row">
+              <span class="habits-auth-label">Style</span>
+              <div class="habits-auth-pills">
+                <button class="chip-btn" data-suggest-action="relearn-habits" type="button" ${h.distilling ? 'disabled' : ''}>
+                  ${h.distilling ? 'Learning…' : 'Re-learn'}
+                </button>
+                <button class="chip-btn ${isConfirmingReset ? 'danger' : ''}" data-suggest-action="reset-habits" type="button">
+                  ${isConfirmingReset ? 'Confirm reset?' : 'Reset'}
+                </button>
+              </div>
             </div>
           </div>
         `;
@@ -957,12 +890,6 @@ function renderSuggestSection() {
         </span>
         <span class="suggest-head-right">
           <button
-            class="chip-btn ${habitsExpanded ? 'habit-on' : ''}"
-            data-suggest-action="toggle-habits"
-            type="button"
-            title="View and manage learned reply habits (${h.total_samples} samples)"
-          >Habits${h.total_samples > 0 ? ` ${h.total_samples}` : ''}</button>
-          <button
             class="chip-btn ${s.auto_suggest ? 'active' : ''}"
             data-suggest-action="toggle-auto-suggest"
             type="button"
@@ -974,6 +901,12 @@ function renderSuggestSection() {
             type="button"
             title="Regenerate suggestion"
           >${iconSvg('refresh', isGen ? 'spinning' : '')}</button>
+          <button
+            class="ghost-btn ${habitsExpanded ? 'active' : ''}"
+            data-suggest-action="toggle-habits"
+            type="button"
+            title="Suggested reply settings"
+          >${iconSvg('settings')}</button>
         </span>
       </div>
       ${bodyHtml}
@@ -1250,14 +1183,7 @@ function render() {
         `
           )
           .join('')
-      : `<div class="muted-note">No outputs yet</div>`;
-
-  const isConfirmingCompact = Date.now() < compactConfirmUntil;
-  const compactBtn = canActOnCurrentSession()
-    ? `<button class="chip-btn ${isConfirmingCompact ? 'danger' : ''}" data-action="compact" type="button" title="Send /compact to summarize earlier turns">${
-        isConfirmingCompact ? 'Confirm /compact?' : '/compact'
-      }</button>`
-    : '';
+      : `<div class="acc-empty">No outputs yet</div>`;
 
   ctxBody.innerHTML = `
       <section class="sec">
@@ -1375,7 +1301,6 @@ function render() {
             <button class="chip-btn ${autoRefresh ? 'active' : ''}" data-action="toggle-auto" type="button" title="Toggle 3s auto-refresh">
               ${autoRefresh ? 'Live 3s' : 'Paused'}
             </button>
-            ${compactBtn}
           </div>
         </div>
       </section>
@@ -1383,10 +1308,18 @@ function render() {
       <div class="divider"></div>
 
       <section class="sec">
-        <div class="sec-title">Outputs</div>
-        <div class="out-list">
-          ${outputsHtml}
-        </div>
+        <button class="acc-btn sec-acc-btn ${outputsExpanded ? 'open' : ''}" data-action="toggle-outputs" type="button">
+          ${iconSvg('chevron')}
+          <span class="acc-title">Outputs</span>
+          <span class="acc-count">${outputs.length}</span>
+        </button>
+        ${
+          outputsExpanded
+            ? `<div class="out-list acc-out-list">
+                ${outputsHtml}
+              </div>`
+            : ''
+        }
       </section>
   `;
 
@@ -1399,13 +1332,14 @@ function render() {
       } else if (action === 'toggle-skills') {
         skillsExpanded = !skillsExpanded;
         render();
+      } else if (action === 'toggle-outputs') {
+        outputsExpanded = !outputsExpanded;
+        render();
       } else if (action === 'refresh') {
         void refreshSnapshot(true);
       } else if (action === 'toggle-auto') {
         autoRefresh = !autoRefresh;
         render();
-      } else if (action === 'compact') {
-        void triggerCompact();
       } else if (action === 'toggle-session-picker') {
         void toggleSessionPicker();
       }

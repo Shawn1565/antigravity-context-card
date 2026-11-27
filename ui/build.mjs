@@ -90,6 +90,11 @@ html, body {
   color: var(--fg);
 }
 
+.ghost-btn.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 .ico-xs {
   width: 12px;
   height: 12px;
@@ -394,6 +399,17 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.sec-acc-btn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 2px;
+}
+
+.acc-out-list {
+  margin-top: 4px;
+  padding-left: 14px;
 }
 
 .muted-note {
@@ -852,11 +868,6 @@ html, body {
   color: var(--fg);
 }
 
-.chip-btn.habit-on {
-  color: #c084fc;
-  border-color: rgba(168, 85, 247, 0.45);
-}
-
 .habits-drawer {
   margin-top: 9px;
   padding: 9px 10px;
@@ -866,16 +877,6 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.habits-stats {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
 }
 
 .habits-auth-row {
@@ -896,87 +897,6 @@ html, body {
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
-}
-
-.habits-model {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10.5px;
-  color: var(--fg-muted);
-}
-
-.habits-profile {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--fg);
-  white-space: pre-wrap;
-}
-
-.habit-phrases {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.habit-pill {
-  padding: 2px 7px;
-  border-radius: 999px;
-  border: 1px solid rgba(168, 85, 247, 0.3);
-  background: rgba(168, 85, 247, 0.08);
-  color: var(--fg);
-  font-size: 11px;
-}
-
-.habit-fb-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-}
-
-.habit-fb-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  min-width: 0;
-}
-
-.fb-tag {
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.fb-tag.fb-edit {
-  background: rgba(168, 85, 247, 0.18);
-  color: #c084fc;
-}
-
-.fb-tag.fb-ok {
-  background: rgba(16, 185, 129, 0.16);
-  color: #34d399;
-}
-
-.fb-tag.fb-ov {
-  background: rgba(245, 158, 11, 0.16);
-  color: #fbbf24;
-}
-
-.fb-text {
-  color: var(--fg-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.habits-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  padding-top: 4px;
 }
 `;
 
