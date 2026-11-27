@@ -1,6 +1,19 @@
 # Antigravity Context Card
 
+[![Release](https://img.shields.io/github/v/release/Shawn1565/antigravity-context-card?style=flat-square&color=7c3aed)](https://github.com/Shawn1565/antigravity-context-card/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-10b981?style=flat-square)](./LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3b82f6?style=flat-square)](https://www.python.org/)
+[![Google Antigravity](https://img.shields.io/badge/Google%20Antigravity-Desktop%20%7C%20IDE%20%7C%20CLI-f97316?style=flat-square)](https://antigravity.google)
+
 [English](#english) | [中文说明](#中文说明)
+
+<p align="center">
+  <img src="./assets/desktop-preview.png" alt="Antigravity Context Card — Desktop 2.0 Side Panel" width="330" />
+</p>
+
+<p align="center">
+  <img src="./assets/cli-preview.png" alt="Antigravity Context Card — CLI statusLine & tmux one-key fill" width="760" />
+</p>
 
 ---
 
@@ -10,24 +23,31 @@
 
 A live **Context Window Monitor & Smart Reply** plugin for **Google Antigravity** across **Desktop 2.0**, **IDE**, and **Antigravity CLI (`agy`)**:
 
-- **Desktop 2.0 & IDE**: Full interactive Claude Desktop-style **MCP App** side panel with progress bar, clickable Memory / Skill / Output previews, one-click `/compact`, and Habits drawer.
+- **Desktop 2.0 & IDE**: Full interactive Claude Desktop-style **MCP App** side panel with a live segmented progress bar (`512K · 1M native`), clickable `Memory files` / `Loaded skills` / collapsible `Outputs` previews, and a clean **Suggested reply** panel with a minimal `⚙` settings drawer.
 - **Antigravity CLI (`agy`) — Native `statusLine` Bar**: A responsive, 1–2 line ANSI segmented progress bar docked right below the CLI prompt box showing live `Messages` / `Thinking` / `Tool I/O` / `Cache %` / `Checkpoints` breakdown plus asynchronous **Suggested Replies**.
 - **Inside `tmux` — One-Key Prompt Insertion**: Automatically upgrades with pane-isolated suggestion sync so pressing **`Alt+y`** (smart `agy`-only passthrough, or **`Prefix + y`** on macOS/SSH) types the suggested reply straight into the `agy` prompt box without pressing Enter—ready to send or tweak. Press **`Alt+u`** to cycle alternatives.
 
-Unlike generic context meters that lump everything into `Messages`, **Context Card** inspects Antigravity's local conversation trajectory in real time and separates **pure dialogue (`Messages`)**, **model reasoning (`Thinking`)**, and **file/command payloads (`Tool calls & outputs`)**—so you always know *what* is consuming your context window and *when* to `/compact` or delegate to subagents.
+### Why Context Card?
+
+1. **Real 512K Auto-Compact Headroom (Not Just Theoretical 1M)**: Although Gemini 4 / 3.x models have a native 1M window, Antigravity automatically triggers `CHECKPOINT` compaction around **~512K tokens**. Context Card tracks the real **512K effective ceiling** (`512K · 1M native`) so 0–100% actually tells you how much room you have left before compaction—and automatically lifts back to `1M` if Antigravity ever raises the cap and active usage exceeds the threshold.
+2. **True Breakdown (Thinking vs. Tool I/O vs. Messages)**: Unlike generic meters that lump everything into `Messages`, Context Card inspects Antigravity's local trajectory in real time and separates **pure dialogue (`Messages`)**, **model reasoning (`Thinking`)**, and **file/command payloads (`Tool calls & outputs`)**—so you always know *what* is filling your window.
 
 ### Features
 
-- **Granular Token Breakdown**: Live progress bar and per-category token & percentage metrics:
+- **Granular Token Breakdown**: Live segmented bar and per-category token & percentage metrics:
   - `Messages` (user prompts & visible assistant replies)
   - `Thinking` (chain-of-thought / reasoning tokens retained in context)
   - `Tool calls & outputs` (file reads, terminal outputs, search results)
   - `System tools`, `Memory files` (`GEMINI.md` / `AGENTS.md` / `CLAUDE.md`), `Skills`, `System prompt`, `Checkpoint summary`, and `Free space`
-- **Prompt Cache Telemetry**: Real-time prompt cache hit ratio (`Cache %`) and active step / checkpoint counters.
+- **Effective Compaction Ceiling + Adaptive Lift**:
+  - Displays `512K · 1M native` for Antigravity Gemini 4 / Orchestrator / 3.x / 2.5 models, caps brief pre-compaction overshoots cleanly at `100%`, lifts automatically to `1M` if exceeded, and supports `CONTEXT_CARD_CONTEXT_LIMIT` env override.
+- **Prompt Cache Telemetry & Compact Layout**:
+  - Real-time prompt cache hit ratio (`Cache %`), active steps, and checkpoint counters.
+  - Collapsible `Outputs` accordion (collapsed by default) keeps **Suggested reply** above the fold even on artifact-heavy threads.
 - **Desktop / IDE Multi-Window Binding**:
   - Auto-opens and locks to each window's exact `conversation_id` via a lightweight rule + `PreInvocation` lifecycle hook (even on resumed historical chats or large workspaces).
+  - Manual `+ -> Context` opens prioritize Antigravity's `annotations/*.pbtxt` `last_user_view_time` (skipping archived sessions) so an idle window you are viewing beats busy background agents, while preserving close-and-reopen affinity.
   - Subagent-safe & CLI-safe: ignores child/subagent runs and skips opening the HTML pane in Antigravity CLI sessions.
-  - Active-pane exclusion when opened manually from `+ -> Context`, plus a one-click session switcher.
 - **Antigravity CLI (`agy`) & `tmux` Integration**:
   - Pure-stdlib transcript parser with disk `(mtime, size)` & skills-catalog caching (~70ms warm / <100ms typical per statusLine refresh including Python startup, zero `mcp` import overhead).
   - Stacked below `agy`'s built-in status bar by default (`stack_with_default: true`) so you never lose mode (`plan`/`auto`), sandbox, or task indicators—with `--replace` available for minimalist layouts, and automatic restoration of any prior custom `statusLine` on uninstall.
@@ -35,15 +55,27 @@ Unlike generic context meters that lump everything into `Messages`, **Context Ca
   - **Pane-isolated `tmux` fill**: each tmux pane tracks its own session under `panes/<pane_id>.json` (`0600`), never crossing wires between parallel `agy` windows. Uses native tmux `if-shell -F` routing so non-`agy` panes (vim, zsh, bash) never spawn Python and experience zero key delay.
 - **One-Click Suggested Replies (Gemini Subscription + BYOK)**:
   - Works **100% offline** for all context monitoring features—zero network calls until you opt in.
-  - **Cross-Surface Auth Sharing**: Auth configured in Desktop 2.0 (or via `cli_setup.py auth`) is automatically shared between Desktop, IDE, and CLI.
+  - **Cross-Surface Auth Sharing**: Auth configured via the `⚙` Settings drawer in Desktop 2.0 (or `cli_setup.py auth`) is automatically shared between Desktop, IDE, and CLI.
   - **One-Click Gemini Subscription Auth**: Reuse your local `agy` Google subscription OAuth—no API key required.
   - **Optional BYOK (~1s ultra-low latency)**: Supports your own **Gemini API Key** or any **OpenAI-compatible endpoint** (Ollama, OpenRouter, DeepSeek, OpenAI).
 
 ### Quick Install
 
-#### 1. Desktop 2.0 & IDE (MCP App Side Panel)
+#### One-Line Install (Desktop 2.0 / IDE)
 
-1. **Ensure `python3` (3.10+) is on your `PATH` and has the `mcp` SDK installed**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Shawn1565/antigravity-context-card/main/install.sh | bash
+```
+
+To also set up **Antigravity CLI (`agy`) `statusLine` + `tmux` keybindings** in one go:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Shawn1565/antigravity-context-card/main/install.sh | bash -s -- --cli
+```
+
+#### Manual Install
+
+1. **Ensure `python3` (3.10+) is on your `PATH` and has the `mcp` SDK installed** (Desktop/IDE only; CLI statusLine is pure stdlib):
    ```bash
    pip install "mcp>=1.2.0"
    ```
@@ -54,9 +86,9 @@ Unlike generic context meters that lump everything into `Messages`, **Context Ca
    ```
 3. Start a new chat (or click `+ -> Context` in the right side panel) and Context Card will appear.
 
-#### 2. Antigravity CLI (`agy`) & `tmux` (Opt-In Setup)
+#### Antigravity CLI (`agy`) & `tmux` Setup
 
-After cloning the plugin above, run the opt-in CLI installer (backs up `~/.gemini/antigravity-cli/settings.json` and `~/.tmux.conf` automatically; pure stdlib—does not even require `pip install mcp` if you only use CLI):
+After cloning the plugin above, run the opt-in CLI installer (backs up `~/.gemini/antigravity-cli/settings.json` and `~/.tmux.conf` automatically):
 
 ```bash
 python3 ~/.gemini/config/plugins/context-card/cli_setup.py install
@@ -65,8 +97,8 @@ python3 ~/.gemini/config/plugins/context-card/cli_setup.py install
 What this configures:
 - **In any terminal (Plan A)**: Stacks a 1–2 line color Context Card bar directly below `agy`'s built-in status line:
   ```text
-  Ctx [█████▓▒░░░░░░░░░] 20.1% (211K/1M) │ Msg 18K · Think 62K · Tool 115K · Cache 84% · Ckpt 1
-  💡 Run the unit tests and commit the changes to the working branch  [Alt+y fill · Alt+u alt]
+  Ctx [██████████░░░░░░] 62.2% (318.4K/512K) │ Msg 24.2K · Think 68.4K · Tool 196.8K · Cache 94% · Ckpt 1
+  💡 Run the OAuth refresh integration tests and open a draft PR  [Alt+y fill · Alt+u alt]
   ```
 - **Inside `tmux` (Plan B)**: Automatically adds smart keybindings to `~/.tmux.conf`:
   - **`Alt+y`** (or **`Prefix + y`** fallback for macOS terminals without Option-as-Meta): Inserts the suggested reply straight into `agy`'s prompt box **without pressing Enter**. Passes `Alt+y` through transparently in non-`agy` panes.
@@ -91,20 +123,20 @@ python3 ~/.gemini/config/plugins/context-card/cli_setup.py uninstall
 Context monitoring requires **no authentication or network**. For smart next-reply suggestions, **4 explicit opt-in modes** are supported (shared automatically across Desktop, IDE, and CLI):
 
 - **Option A — Gemini Subscription via `agy` CLI (Zero API Key)**:
-  - **Desktop/IDE**: Click **Use Subscription (agy)** once in the panel.
+  - **Desktop/IDE**: Click **Use Subscription (agy)** once in the panel (or open `⚙` → `Subscription (agy)`).
   - **CLI**:
     ```bash
     python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth agy
     ```
 - **Option B — Gemini API Key (~1s fastest response)**:
-  - **Desktop/IDE**: Open `Habits` -> `Set Key` and click **Save** (toggle `Auto` / `Off` anytime in the panel header).
+  - **Desktop/IDE**: Click the `⚙` icon in the Suggested reply header → `Set Key` and click **Save** (toggle `Auto` / `Off` anytime).
   - **CLI** (interactive prompt or stdin — avoids storing keys in shell history):
     ```bash
     python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth gemini
     # Or via stdin:
     # printf '%s' "$GEMINI_API_KEY" | python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth gemini -
     ```
-  Stored locally with `0600` permissions in `plugin_data/context-card/llm_config.json` (never inside the plugin folder). Note that saved auth is shared across CLI, Desktop, and IDE (including Desktop habit learning) unless cleared per surface.
+  Stored locally with `0600` permissions in `plugin_data/context-card/llm_config.json` (never inside the plugin folder).
 - **Option C — Environment variable**:
   ```bash
   export GEMINI_API_KEY="AIza..."
@@ -145,20 +177,24 @@ npm run build
 
 专为 **Google Antigravity** 打造的**全端上下文窗口实时监控与智能回复插件**，完整支持 **Desktop 2.0、IDE 与 Antigravity CLI (`agy`)**：
 
-- **Desktop 2.0 / IDE**：Claude Desktop 风格的交互式 **MCP App** 侧边栏，支持分段进度条、规则/Skill/产物直达预览、一键 `/compact` 与习惯学习抽屉。
+- **Desktop 2.0 / IDE**：Claude Desktop 风格的交互式 **MCP App** 侧边栏，支持 **512K 自动压缩真实余量（`512K · 1M native`）** 彩色分段进度条、规则/Skill/可折叠 `Outputs` 产物直达预览，以及清爽的 **Suggested reply** 卡片与极简 `⚙` 设置抽屉。
 - **Antigravity CLI (`agy`) — 原生 `statusLine` 磁吸横条（方案 A）**：利用官方 `statusLine` 在 CLI 输入框下方磁吸 1–2 行 ANSI 彩色进度条，实时拆分展示 `Messages` / `Thinking` / `Tool I/O` / `Cache %` / `Checkpoints`，并在空闲时异步展示 **智能建议回复**。
 - **`tmux` 环境增强 — 快捷键一键填入输入框（方案 B）**：自动识别 `$TMUX_PANE` 并按窗格隔离状态，在 `agy` 窗格按 **`Alt+y`**（或 macOS/SSH 通用兜底 **`Prefix + y`**）即可将建议回复直接填入输入框（**不自动回车**，可修改后再发）；按 **`Alt+u`** 轮换备选建议；在非 `agy` 窗格自动原样透传按键，零干扰。
 
-不同于把所有对话和工具输出全部混入 `Messages` 的笼统统计方式，**Context Card** 实时解析本地会话轨迹，将 **`Messages`（纯对话）**、**`Thinking`（模型推理链）** 与 **`Tool calls & outputs`（文件读取与终端输出）** 清晰拆分——让你一眼看清到底是大文件/长日志吃满了窗口，还是对话轮次过多需要 `/compact` 或派发子代理。
+### 为什么需要 Context Card？
+
+1. **看清真实的 512K 自动压缩红线**：Gemini 4 / 3.x 模型底层原生窗口虽为 1M，但 Antigravity 在实际运行中会在 **~512K tokens** 自动触发 `CHECKPOINT` 压缩。Context Card 以 **512K 有效压缩上限** 作为 0–100% 刻度（并标注 `1M native`），让你真实感知离自动压缩还有多少余量；若未来官方放宽上限且实测用量超出阈值，插件会自动抬升回 `1M` 分母。
+2. **拆开对话、思考链与工具输出**：不同于把所有 token 全部混在 `Messages` 里的笼统统计，Context Card 实时解析本地会话轨迹，把 **`Messages`（纯对话）**、**`Thinking`（模型推理链）** 与 **`Tool calls & outputs`（文件读取与终端输出）** 清晰拆分——一眼看清到底是谁吃满了窗口。
 
 ### 核心特性
 
 - **精细化上下文分项统计**：
   - 独立统计 `Messages`、`Thinking`、`Tool calls & outputs`、`System tools`、`Memory files`（`GEMINI.md` / `AGENTS.md` / `CLAUDE.md`）、`Skills`、`System prompt`、`Checkpoint summary` 与 `Free space`。
-  - 实时显示 **Prompt Cache 命中率（`Cache %`）**、活跃步数及 `/compact` 检查点次数；超过 80% 自动标红提醒 `/compact`。
-- **Desktop / IDE 可靠多窗口绑定**：
-  - 结合轻量规则与 `PreInvocation` 生命周期钩子自动打开并精确绑定当前 `conversation_id`。
-  - 自动跳过子代理会话与 Antigravity CLI 会话，避免在纯终端中触发无意义的侧边栏打开调用。
+  - 实时显示 **Prompt Cache 命中率（`Cache %`）**、活跃步数与检查点次数；压缩前小幅溢出百分比封顶 `100%`（同时保留真实 token 数），CLI 超过 80% 自动标红提醒 `/compact`。
+  - 支持环境变量 `CONTEXT_CARD_CONTEXT_LIMIT` 自定义覆盖分母上限。
+- **清爽首屏与多窗口精准绑定**：
+  - `Outputs` 区块默认折叠（显示产出数量），产物再多也不会把下面的 `Suggested reply` 挤出首屏；后台静默学习回复习惯，仅在角落保留一个极简 `⚙` 齿轮管理 Auth 与重置风格。
+  - 自动绑定与手动 `+ -> Context` 均精准匹配当前窗口：手动打开优先读取 Antigravity 的 `annotations/*.pbtxt` 用户实时查看时间（过滤已归档会话），后台跑任务的窗口不再抢焦，且自动跳过子代理与 CLI 会话。
 - **CLI 原生 `statusLine` + `tmux` 一键上屏**：
   - 核心解析逻辑抽离为纯标准库模块 `core.py`，配合 `(mtime, size)` 与 skills 目录磁盘缓存，单次状态栏刷新约 **~70ms（含 Python 进程启动）**，不拖慢 TUI。
   - 默认以 `stack_with_default: true` 叠加在官方底栏下方，完整保留 `plan`/`auto` 模式、沙箱与后台任务提示（支持 `--replace` 替换模式，卸载时自动恢复用户原有自定义 `statusLine`）。
@@ -166,13 +202,25 @@ npm run build
   - 按 `$TMUX_PANE` 独立隔离缓存（`panes/<pane_id>.json`，`0600` 权限），多窗格并行跑 `agy` 绝不串话；通过 tmux 原生 `if-shell -F` 分流，非 `agy` 窗格零子进程开销、零按键延迟。
 - **跨端共享智能建议回复鉴权（Gemini 订阅 + BYOK）**：
   - **上下文监控主功能 100% 离线运行**，未显式配置鉴权前零外部网络请求。
-  - 在 Desktop 2.0 面板中配置好的订阅通道或 API Key，CLI 会自动回退共享，无需重复填写。
+  - 在 Desktop 2.0 面板中配置好的订阅通道或 API Key，CLI 会自动共享，无需重复填写。
 
 ### 快速安装
 
-#### 1. Desktop 2.0 & IDE（右侧边栏 MCP App）
+#### 一行命令安装（Desktop 2.0 / IDE）
 
-1. **确保本机 `python3`（3.10+）已在 `PATH` 中且安装了 `mcp` SDK**：
+```bash
+curl -fsSL https://raw.githubusercontent.com/Shawn1565/antigravity-context-card/main/install.sh | bash
+```
+
+如需同时配置 **Antigravity CLI (`agy`) 状态栏与 `tmux` 快捷键**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Shawn1565/antigravity-context-card/main/install.sh | bash -s -- --cli
+```
+
+#### 手动安装
+
+1. **确保本机 `python3`（3.10+）已在 `PATH` 中且安装了 `mcp` SDK**（仅 Desktop/IDE 需要，CLI 状态栏为纯标准库）：
    ```bash
    pip install "mcp>=1.2.0"
    ```
@@ -183,9 +231,9 @@ npm run build
    ```
 3. 新建对话（或点击右侧边栏 `+ -> Context`）即可使用。
 
-#### 2. Antigravity CLI (`agy`) 与 `tmux`（显式一键配置）
+#### Antigravity CLI (`agy`) 与 `tmux` 配置
 
-克隆插件后，执行安装脚本（自动备份 `~/.gemini/antigravity-cli/settings.json` 与 `~/.tmux.conf`；纯 CLI 使用甚至无需安装 `mcp` 依赖）：
+克隆插件后，执行安装脚本（自动备份 `~/.gemini/antigravity-cli/settings.json` 与 `~/.tmux.conf`）：
 
 ```bash
 python3 ~/.gemini/config/plugins/context-card/cli_setup.py install
@@ -194,7 +242,7 @@ python3 ~/.gemini/config/plugins/context-card/cli_setup.py install
 安装后效果：
 - **任意终端（方案 A）**：在 `agy` 输入框下方磁吸展示 1–2 行自适应宽度的彩色状态条：
   ```text
-  Ctx [█████▓▒░░░░░░░░░] 20.1% (211K/1M) │ Msg 18K · Think 62K · Tool 115K · Cache 84% · Ckpt 1
+  Ctx [██████████░░░░░░] 62.2% (318.4K/512K) │ Msg 24.2K · Think 68.4K · Tool 196.8K · Cache 94% · Ckpt 1
   💡 继续跑一下单测并把改动提交到工作分支  [Alt+y fill · Alt+u alt]
   ```
 - **在 `tmux` 内（方案 B）**：自动写入受管配置块到 `~/.tmux.conf`：
@@ -220,20 +268,20 @@ python3 ~/.gemini/config/plugins/context-card/cli_setup.py uninstall
 上下文监控无需任何网络或鉴权。建议回复支持以下 **4 种显式接入方式**（Desktop、IDE 与 CLI 自动共享配置）：
 
 - **方式一：一键复用 Gemini 订阅（免 API Key）**
-  - **桌面端**：首次点击面板中的 **Use Subscription (agy)**。
+  - **桌面端**：点击面板中的 **Use Subscription (agy)**（或点击右上角 `⚙` → `Subscription (agy)`）。
   - **CLI**：
     ```bash
     python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth agy
     ```
 - **方式二：填写 Gemini API Key（约 1 秒极速直连）**
-  - **桌面端**：展开 `Habits` 点击 **Set Key** 保存（可随时在面板右上角切换 `Auto` / `Off`）。
+  - **桌面端**：点击建议回复右上角 `⚙` → **Set Key** 保存（可随时切换 `Auto` / `Off`）。
   - **CLI**（推荐交互输入或通过 stdin 传入，避免密钥落入 shell 历史记录）：
     ```bash
     python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth gemini
     # 或通过 stdin 传入：
     # printf '%s' "$GEMINI_API_KEY" | python3 ~/.gemini/config/plugins/context-card/cli_setup.py auth gemini -
     ```
-  密钥以 `0600` 权限保存在 `plugin_data/context-card/llm_config.json`，绝不写入代码目录。保存的鉴权会在 CLI、Desktop 与 IDE 间共享（包含桌面端的本地习惯学习，除非在对应端显式清除）。
+  密钥以 `0600` 权限保存在 `plugin_data/context-card/llm_config.json`，绝不写入代码目录。
 - **方式三：环境变量配置**
   ```bash
   export GEMINI_API_KEY="AIza..."
