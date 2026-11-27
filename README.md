@@ -21,16 +21,18 @@
 
 ## English
 
-A live **Context Window Monitor & Smart Reply** plugin for **Google Antigravity** across **Desktop 2.0**, **IDE**, and **Antigravity CLI (`agy`)**:
+A **zero-invasion, Claude Desktop-style Context Sidebar & Smart Reply** plugin for **Google Antigravity** across **Desktop 2.0**, **IDE**, **Antigravity CLI (`agy`)**, and **`tmux`**:
 
-- **Desktop 2.0 & IDE**: Full interactive Claude Desktop-style **MCP App** side panel with a live segmented progress bar (`512K · 1M native`), clickable `Memory files` / `Loaded skills` / collapsible `Outputs` previews, and a clean **Suggested reply** panel with a minimal `⚙` settings drawer.
-- **Antigravity CLI (`agy`) — Native `statusLine` Bar**: A responsive, 1–2 line ANSI segmented progress bar docked right below the CLI prompt box showing live `Messages` / `Thinking` / `Tool I/O` / `Cache %` / `Checkpoints` breakdown plus asynchronous **Suggested Replies**.
-- **Inside `tmux` — One-Key Prompt Insertion**: Automatically upgrades with pane-isolated suggestion sync so pressing **`Alt+y`** (smart `agy`-only passthrough, or **`Prefix + y`** on macOS/SSH) types the suggested reply straight into the `agy` prompt box without pressing Enter—ready to send or tweak. Press **`Alt+u`** to cycle alternatives.
+- **Claude Desktop-Style Side Panel (Official MCP App)**: Clean, native-feeling right-hand sidebar—`Environment` metadata, segmented context progress bar (`512K · 1M native`), clickable `Memory files` / `Loaded skills` / collapsible `Outputs`, and a distraction-free **Suggested reply** card with a minimal `⚙` settings drawer.
+- **Zero-Invasion Official Protocols (No `app.asar` Patching, No CDP)**: Built 100% on Antigravity's official **MCP App** (`ui://`) and official CLI **`statusLine`**—never modifies Electron `app.asar`, never breaks macOS/Linux app signatures, and survives Antigravity updates cleanly.
+- **Antigravity CLI (`agy`) & `tmux` Included**: Pure-stdlib 1–2 line ANSI `statusLine` bar (~70ms warm) showing live `Messages` / `Thinking` / `Tool I/O` / `Cache %` / `Checkpoints` plus pane-isolated **`Alt+y`** (`Prefix + y` on macOS/SSH) one-key suggested reply insertion (**without pressing Enter**; zero delay in non-`agy` panes).
 
 ### Why Context Card?
 
-1. **Real 512K Auto-Compact Headroom (Not Just Theoretical 1M)**: Although Gemini 4 / 3.x models have a native 1M window, Antigravity automatically triggers `CHECKPOINT` compaction around **~512K tokens**. Context Card tracks the real **512K effective ceiling** (`512K · 1M native`) so 0–100% actually tells you how much room you have left before compaction—and automatically lifts back to `1M` if Antigravity ever raises the cap and active usage exceeds the threshold.
-2. **True Breakdown (Thinking vs. Tool I/O vs. Messages)**: Unlike generic meters that lump everything into `Messages`, Context Card inspects Antigravity's local trajectory in real time and separates **pure dialogue (`Messages`)**, **model reasoning (`Thinking`)**, and **file/command payloads (`Tool calls & outputs`)**—so you always know *what* is filling your window.
+1. **Zero Client Hacking — Safe Through Every Update**: Unlike heavy dashboards that patch Electron `app.asar` or inject into CDP (which can trip macOS signature checks or break on new Antigravity releases), Context Card uses only Antigravity's sanctioned MCP App + Hook + CLI `statusLine` APIs.
+2. **Claude Desktop-Style Clarity Without Bloat**: A calm, focused right-hand Context sidebar inspired by Claude Desktop—collapsible `Outputs`, silent background habit learning, and a single corner `⚙` gear instead of crowded multi-tab telemetry dashboards.
+3. **Real 512K Auto-Compact Headroom (`512K · 1M native`)**: Although Gemini 4 / 3.x models have a native 1M window, Antigravity automatically triggers `CHECKPOINT` compaction around **~512K tokens**. Context Card tracks the real **512K effective ceiling** so 0–100% reflects actual headroom before compaction—and automatically lifts back to `1M` if Antigravity raises the cap and active usage exceeds the threshold.
+4. **True Breakdown + Interactive Productivity**: Separates **Messages** (dialogue), **Thinking** (reasoning chain), and **Tool calls & outputs** (file reads / command logs) in real time, and pairs read-only monitoring with **one-click Suggested Replies** (Desktop `Send` + `tmux` `Alt+y` fill, supporting zero-key `agy` Gemini subscription, BYOK, or local Ollama).
 
 ### Features
 
@@ -175,16 +177,18 @@ npm run build
 
 ## 中文说明
 
-专为 **Google Antigravity** 打造的**全端上下文窗口实时监控与智能回复插件**，完整支持 **Desktop 2.0、IDE 与 Antigravity CLI (`agy`)**：
+专为 **Google Antigravity** 打造的**零侵入、仿 Claude Desktop 风格全端上下文侧边栏与智能回复插件**，一套插件打通 **Desktop 2.0、IDE、Antigravity CLI (`agy`) 与 `tmux`**：
 
-- **Desktop 2.0 / IDE**：Claude Desktop 风格的交互式 **MCP App** 侧边栏，支持 **512K 自动压缩真实余量（`512K · 1M native`）** 彩色分段进度条、规则/Skill/可折叠 `Outputs` 产物直达预览，以及清爽的 **Suggested reply** 卡片与极简 `⚙` 设置抽屉。
-- **Antigravity CLI (`agy`) — 原生 `statusLine` 磁吸横条（方案 A）**：利用官方 `statusLine` 在 CLI 输入框下方磁吸 1–2 行 ANSI 彩色进度条，实时拆分展示 `Messages` / `Thinking` / `Tool I/O` / `Cache %` / `Checkpoints`，并在空闲时异步展示 **智能建议回复**。
-- **`tmux` 环境增强 — 快捷键一键填入输入框（方案 B）**：自动识别 `$TMUX_PANE` 并按窗格隔离状态，在 `agy` 窗格按 **`Alt+y`**（或 macOS/SSH 通用兜底 **`Prefix + y`**）即可将建议回复直接填入输入框（**不自动回车**，可修改后再发）；按 **`Alt+u`** 轮换备选建议；在非 `agy` 窗格自动原样透传按键，零干扰。
+- **仿 Claude Desktop 极简侧边栏（官方 MCP App）**：贴近 Claude Desktop 的精致右侧上下文面板——环境信息、**512K 自动压缩真实余量（`512K · 1M native`）** 彩色分段条、可点击的 `Memory files` / `Loaded skills` / 默认折叠 `Outputs`，以及清爽的 **Suggested reply** 卡片与极简 `⚙` 设置齿轮。
+- **零侵入纯官方协议（不改 `app.asar`、不注入 CDP）**：100% 基于 Antigravity 官方 **MCP App** 与官方 CLI **`statusLine`** 接口，**不修改客户端安装包、不破坏 macOS/Linux 应用签名、客户端怎么升级都不会炸**。
+- **CLI 原生 `statusLine` + `tmux` `Alt+y` 一键上屏**：纯 Python 标准库实现（~70ms 刷新），输入框下方常驻彩色进度条；`tmux` 下按 **`Alt+y`**（macOS/SSH 兜底 **`Prefix + y`**）可将建议回复直接填入 `agy` 输入框（**不自动回车**，非 `agy` 窗格零延迟透传）。
 
-### 为什么需要 Context Card？
+### 为什么选择 Context Card？
 
-1. **看清真实的 512K 自动压缩红线**：Gemini 4 / 3.x 模型底层原生窗口虽为 1M，但 Antigravity 在实际运行中会在 **~512K tokens** 自动触发 `CHECKPOINT` 压缩。Context Card 以 **512K 有效压缩上限** 作为 0–100% 刻度（并标注 `1M native`），让你真实感知离自动压缩还有多少余量；若未来官方放宽上限且实测用量超出阈值，插件会自动抬升回 `1M` 分母。
-2. **拆开对话、思考链与工具输出**：不同于把所有 token 全部混在 `Messages` 里的笼统统计，Context Card 实时解析本地会话轨迹，把 **`Messages`（纯对话）**、**`Thinking`（模型推理链）** 与 **`Tool calls & outputs`（文件读取与终端输出）** 清晰拆分——一眼看清到底是谁吃满了窗口。
+1. **零改盘、零侵入，升级无忧**：区别于需要修改 Electron `app.asar` 或注入 CDP 的重型看板（容易在 macOS 触发签名校验失败，或随 Antigravity 版本更新失效），Context Card 完全走官方标准插件协议，即装即用、随时干净卸载。
+2. **仿 Claude Desktop 的克制美学**：不做臃肿的多页签仪表盘，还原 Claude Desktop 干净顺手的右侧上下文视图——`Outputs` 默认折叠不占首屏、习惯学习后台静默运行、右上角仅留一个极简 `⚙` 设置入口。
+3. **看清真实的 512K 自动压缩红线（`512K · 1M native`）**：Gemini 4 / 3.x 模型底层原生窗口虽为 1M，但 Antigravity 在实际运行中会在 **~512K tokens** 自动触发 `CHECKPOINT` 压缩。Context Card 以 **512K 有效压缩上限** 作为 0–100% 刻度，让你真实感知离自动压缩还有多少余量；若未来官方放宽上限且实测用量超出阈值，会自动抬升回 `1M` 分母。
+4. **精细拆解 + 交互提效合一**：实时拆分 **`Messages`（纯对话）**、**`Thinking`（思考链）** 与 **`Tool calls & outputs`（文件/命令输出）**，不止于只读监控，还内置 **一键下一句建议回复**（支持零 Key 复用 `agy` Gemini 订阅、自带 API Key 或本地 Ollama；不配置鉴权则 100% 本地离线）。
 
 ### 核心特性
 
