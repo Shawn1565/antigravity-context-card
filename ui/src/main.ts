@@ -79,6 +79,7 @@ interface ContextSnapshot {
   used_tokens?: number;
   active_input_tokens?: number;
   limit_tokens?: number;
+  native_limit_tokens?: number;
   used_pct?: number;
   free_tokens?: number;
   cache_read_tokens?: number;
@@ -1135,6 +1136,11 @@ function render() {
   const usedPct = snap.used_pct ?? 0;
   const usedTokens = snap.used_tokens ?? 0;
   const limitTokens = snap.limit_tokens ?? 512000;
+  const nativeLimitTokens = snap.native_limit_tokens ?? limitTokens;
+  const hasCompactCap = nativeLimitTokens > limitTokens;
+  const ratioTitle = hasCompactCap
+    ? `Antigravity auto-compact limit: ${fmtTokens(limitTokens)} (model native window: ${fmtTokens(nativeLimitTokens)}; auto-lifts if exceeded)`
+    : `Model context window: ${fmtTokens(limitTokens)}`;
   const categories = snap.categories ?? [];
   const memoryFiles = snap.memory_files ?? [];
   const loadedSkills = snap.loaded_skills ?? [];
@@ -1340,11 +1346,11 @@ function render() {
         </div>
 
         <div class="ctx-summary">
-          <span class="ctx-pct ${pctClass}">${Math.round(usedPct)}% used</span>
-          <span class="ctx-ratio">${fmtTokens(usedTokens)} / ${fmtTokens(limitTokens)}</span>
+          <span class="ctx-pct ${pctClass}">${Math.min(100, Math.round(usedPct))}% used</span>
+          <span class="ctx-ratio" title="${esc(ratioTitle)}">${fmtTokens(usedTokens)} / ${fmtTokens(limitTokens)}${hasCompactCap ? `<span class="ctx-native"> · ${fmtTokens(nativeLimitTokens)} native</span>` : ''}</span>
         </div>
 
-        <div class="bar-track" role="progressbar" aria-valuenow="${Math.round(usedPct)}" aria-valuemin="0" aria-valuemax="100">
+        <div class="bar-track" role="progressbar" aria-valuenow="${Math.min(100, Math.round(usedPct))}" aria-valuemin="0" aria-valuemax="100">
           ${barSegments}
         </div>
 

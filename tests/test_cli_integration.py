@@ -355,13 +355,98 @@ class TestStopHookOptIn(unittest.TestCase):
 
 class TestModelLimits(unittest.TestCase):
     def test_known_and_unknown_model_limits(self) -> None:
-        self.assertEqual(core.format_model("gemini-4-neon-high"), ("Gemini 4 Neon (High)", 1_048_576))
-        self.assertEqual(core.format_model("gemini-pro-orchestrator-neon"), ("Orchestrator (Neon)", 1_048_576))
+        self.assertEqual(core.format_model("gemini-4-neon-high"), ("Gemini 4 Neon (High)", 512_000))
+        self.assertEqual(core.format_model_limits("gemini-4-neon-high"), ("Gemini 4 Neon (High)", 512_000, 1_048_576))
+        self.assertEqual(core.format_model("gemini-pro-orchestrator-neon"), ("Orchestrator (Neon)", 512_000))
+        self.assertEqual(
+            core.format_model_limits("gemini-pro-orchestrator-neon"),
+            ("Orchestrator (Neon)", 512_000, 1_048_576),
+        )
         self.assertEqual(core.format_model("claude-opus-5-5-high"), ("Claude Opus 5.5 (High)", 1_000_000))
         self.assertEqual(core.format_model("claude-sonnet-5-5-medium"), ("Claude Sonnet 5.5 (Medium)", 1_000_000))
         self.assertEqual(core.format_model("gpt-oss-120b-medium"), ("GPT-OSS 120B (Medium)", 131_072))
         self.assertEqual(core.format_model("some-future-model"), ("Some Future Model", 512_000))
         self.assertEqual(core.format_model(None), ("Unknown model", 512_000))
+
+    def test_adaptive_limit_lift_and_env_override(self) -> None:
+        env_clean = {k: v for k, v in os.environ.items() if k != "CONTEXT_CARD_CONTEXT_LIMIT"}
+        with mock.patch.dict(os.environ, env_clean, clear=True):
+            # Normal usage stays on 512K effective limit with 1M native
+            self.assertEqual(
+                core.resolve_effective_limit(512_000, 1_048_576, 250_000, 240_000),
+                (512_000, 1_048_576),
+            )
+            # Slight pre-compaction overshoot right before CHECKPOINT must NOT jump down to 49%
+            self.assertEqual(
+                core.resolve_effective_limit(512_000, 1_048_576, 520_000, 514_000),
+                (512_000, 1_048_576),
+            )
+            # Genuine overflow beyond buffer lifts automatically to native 1M
+            self.assertEqual(
+                core.resolve_effective_limit(512_000, 1_048_576, 565_000, 560_000),
+                (1_048_576, 1_048_576),
+            )
+        with mock.patch.dict(os.environ, {**env_clean, "CONTEXT_CARD_CONTEXT_LIMIT": "768000"}, clear=True):
+            self.assertEqual(
+                core.resolve_effective_limit(512_000, 1_048_576, 100_000, 100_000),
+                (768_000, 1_048_576),
+            )
+
+    def test_cli_statusline_uses_512k_effective_and_lifts_on_overflow(self) -> None:
+        import re
+
+        ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+        with tempfile.TemporaryDirectory() as td:
+            args = mock.MagicMock(data_dir=td, replace=False, no_suggest=True)
+            base_payload = {
+                "terminal_width": 120,
+                "model": {"id": "gemini-4-neon-high", "display_name": "Gemini 4 Neon (High)"},
+                "context_window": {
+                    "context_window_size": 1_048_576,
+                    "used_percentage": 24.4,
+                    "current_usage": {
+                        "input_tokens": 56_000,
+                        "cache_read_input_tokens": 200_000,
+                        "output_tokens": 0,
+                    },
+                },
+            }
+            out_normal = ansi_re.sub("", cli_statusline.render_statusline(base_payload, args))
+            self.assertIn("50.0%", out_normal)
+            self.assertIn("(256K/512K)", out_normal)
+
+            # Pre-compaction slight overshoot caps percentage at 100.0% while showing real token count
+            overshoot_payload = {
+                **base_payload,
+                "context_window": {
+                    "context_window_size": 1_048_576,
+                    "used_percentage": 49.3,
+                    "current_usage": {
+                        "input_tokens": 7_100,
+                        "cache_read_input_tokens": 500_000,
+                        "output_tokens": 10_000,
+                    },
+                },
+            }
+            out_cap = ansi_re.sub("", cli_statusline.render_statusline(overshoot_payload, args))
+            self.assertIn("100.0%", out_cap)
+            self.assertNotIn("101.", out_cap)
+            self.assertIn("(517.1K/512K)", out_cap)
+
+            overflow_payload = {
+                **base_payload,
+                "context_window": {
+                    "context_window_size": 1_048_576,
+                    "used_percentage": 57.2,
+                    "current_usage": {
+                        "input_tokens": 100_000,
+                        "cache_read_input_tokens": 500_000,
+                        "output_tokens": 0,
+                    },
+                },
+            }
+            out_lift = ansi_re.sub("", cli_statusline.render_statusline(overflow_payload, args))
+            self.assertIn("(600K/1M)", out_lift)
 
 
 class TestServerLifeAndPreInvocation(unittest.TestCase):
@@ -477,6 +562,58 @@ class TestServerLifeAndPreInvocation(unittest.TestCase):
         html = (PLUGIN_ROOT / "dist" / "app.html").read_text(encoding="utf-8")
         self.assertIn("Back to chat", html)
         self.assertIn("Detached pane", html)
+
+
+class TestManualOpenWindowDetection(unittest.TestCase):
+    def test_manual_open_prefers_last_user_view_time_over_busy_background_agent(self) -> None:
+        import server
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            brain = root / "brain"
+            ann = root / "annotations"
+            ann.mkdir(parents=True)
+            now = time.time()
+
+            def make_conv(cid: str, transcript_age: float, view_age: float, *, archived: bool = False) -> None:
+                tpath = brain / cid / ".system_generated" / "logs" / "transcript.jsonl"
+                tpath.parent.mkdir(parents=True, exist_ok=True)
+                tpath.write_text('{"type":"USER_INPUT","content":"hi"}\n', encoding="utf-8")
+                t_ts = now - transcript_age
+                os.utime(tpath, (t_ts, t_ts))
+                v_sec = int(now - view_age)
+                arch_str = " archived:true" if archived else ""
+                p = ann / f"{cid}.pbtxt"
+                p.write_text(
+                    f'title:"{cid}"{arch_str} last_user_view_time:{{seconds:{v_sec} nanos:0}}\n',
+                    encoding="utf-8",
+                )
+                os.utime(p, (v_sec, v_sec))
+
+            # Window A: visible & already has an active pane (viewed 1s ago)
+            make_conv("win-a-bound", transcript_age=60.0, view_age=1.0)
+            # Window B: idle for 10 min, user just switched here & clicked '+' (viewed 3s ago, NO pane)
+            make_conv("win-b-target", transcript_age=600.0, view_age=3.0)
+            # Window C: background agent actively writing transcript 0.2s ago, last viewed 45s ago
+            make_conv("win-c-busy-bg", transcript_age=0.2, view_age=45.0)
+            # Window D: archived conversation viewed 0.5s ago (must be ignored)
+            make_conv("win-d-archived", transcript_age=1.0, view_age=0.5, archived=True)
+
+            with (
+                mock.patch.object(server, "BRAIN_DIR", brain),
+                mock.patch.object(server, "ANNOTATIONS_DIR", ann),
+                mock.patch.object(server, "SUMMARIES_DB", root / "missing.db"),
+                mock.patch.object(server, "_get_runtime_maps", return_value=({"win-a-bound"}, {})),
+            ):
+                picked = server._find_latest_conversation_id(exclude_active_panes=True)
+                self.assertEqual(picked, "win-b-target")
+
+                # Quick close-and-reopen case: if only unbound window is stale (>5 min older than top),
+                # stay on the most recently viewed window instead of jumping to an old tab.
+                make_conv("win-b-target", transcript_age=600.0, view_age=600.0)
+                make_conv("win-c-busy-bg", transcript_age=0.2, view_age=600.0)
+                picked_reopen = server._find_latest_conversation_id(exclude_active_panes=True)
+                self.assertEqual(picked_reopen, "win-a-bound")
 
 
 if __name__ == "__main__":

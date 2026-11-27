@@ -35,9 +35,13 @@ DEFAULT_HTML_PATH = PLUGIN_ROOT / "dist" / "app.html"
 PREFS_PATH = habits.DATA_DIR / "prefs.json"
 RUNTIME_DB_PATH = habits.DATA_DIR / "runtime_state.db"
 BRAIN_DIR = habits.BRAIN_DIR
+ANNOTATIONS_DIR = habits.AGY_HOME / "annotations"
 SUMMARIES_DB = habits.SUMMARIES_DB
 CONFIG_DIR = Path.home() / ".gemini" / "config"
 BUILTIN_SKILLS_DIR = habits.AGY_HOME / "builtin" / "skills"
+
+_VIEW_TIME_RE = re.compile(r"last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}")
+_ARCHIVED_RE = re.compile(r"\barchived\s*:\s*true\b")
 
 DEFAULT_SUGGEST_MODEL = habits.DEFAULT_GEMINI_MODEL
 SERVER_PID = os.getpid()
@@ -504,18 +508,74 @@ def _get_sidebar_title(cid: str) -> str | None:
     return None
 
 
+def _get_user_view_times(limit: int = 40) -> tuple[dict[str, float], set[str]]:
+    """Read per-conversation last_user_view_time from ~/.gemini/antigravity/annotations/*.pbtxt.
+
+    Antigravity updates each conversation's annotation file whenever the user views or
+    focuses that window, making it a far more accurate signal for manual '+' opens than
+    transcript mtime (which is skewed by background running agents).
+    """
+    view_map: dict[str, float] = {}
+    archived: set[str] = set()
+    if not ANNOTATIONS_DIR.is_dir():
+        return (view_map, archived)
+    try:
+        entries: list[tuple[float, str, Path]] = []
+        for entry in ANNOTATIONS_DIR.iterdir():
+            if not entry.name.endswith(".pbtxt"):
+                continue
+            cid = _sanitize_cid(entry.name[:-6])
+            if not cid:
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            entries.append((st.st_mtime, cid, entry))
+        entries.sort(key=lambda x: x[0], reverse=True)
+        for mtime, cid, path in entries[: max(1, int(limit))]:
+            try:
+                raw = path.read_text(encoding="utf-8", errors="ignore")[:1024]
+            except OSError:
+                continue
+            if _ARCHIVED_RE.search(raw):
+                archived.add(cid)
+                continue
+            m = _VIEW_TIME_RE.search(raw)
+            if m:
+                sec = int(m.group(1))
+                nanos = int(m.group(2) or 0)
+                view_map[cid] = sec + (nanos / 1e9)
+            else:
+                view_map[cid] = mtime
+    except OSError:
+        pass
+    return (view_map, archived)
+
+
 def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | None:
     """Return the best matching top-level interactive conversation ID.
 
-    When exclude_active_panes=True (manual '+' pane open with empty args),
-    conversations already displayed in another actively polling Context Card
-    pane are deprioritized so multi-window setups bind to the unbound window.
+    When exclude_active_panes=True (manual '+' pane open with empty args):
+      1. Prioritize Antigravity's `annotations/<cid>.pbtxt` `last_user_view_time`
+         so the window the user is actually looking at beats busy background agents.
+      2. Deprioritize conversations already displayed in another actively polling
+         Context Card pane, while avoiding jumping to stale windows (>5 min older
+         than the most recently viewed window, e.g. on quick close-and-reopen).
+      3. Fall back to transcript/summary activity timestamps when no view telemetry
+         is available.
     """
     active_cids, hook_map = _get_runtime_maps()
+    view_map, archived_cids = _get_user_view_times(limit=40)
+    cli_cids = _get_headless_cli_cids()
     candidates: dict[str, float] = {}
+    sidebar_cids: set[str] = set()
 
     for item in _query_sidebar_summaries(limit=30):
         cid = item["conversation_id"]
+        if cid in archived_cids:
+            continue
+        sidebar_cids.add(cid)
         tpath = BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
         mtime_ep = 0.0
         try:
@@ -527,12 +587,11 @@ def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | No
         score = max(float(item["user_ts"]), float(item["mod_ts"]), mtime_ep, hook_ep)
         candidates[cid] = max(candidates.get(cid, 0.0), score)
 
-    cli_cids = _get_headless_cli_cids()
     for cid, (_ws, hook_ep) in hook_map.items():
         if hook_ep <= 0:
             continue
         root_cid = _resolve_root_conversation_id(cid) or cid
-        if root_cid in cli_cids:
+        if root_cid in cli_cids or root_cid in archived_cids:
             continue
         tpath = BRAIN_DIR / root_cid / ".system_generated" / "logs" / "transcript.jsonl"
         mtime_ep = 0.0
@@ -541,6 +600,34 @@ def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | No
         except OSError:
             pass
         candidates[root_cid] = max(candidates.get(root_cid, 0.0), hook_ep, mtime_ep)
+
+    if exclude_active_panes and view_map:
+        view_candidates: dict[str, float] = {}
+        for cid, v_ts in view_map.items():
+            if v_ts <= 0 or cid in archived_cids:
+                continue
+            root_cid = _resolve_root_conversation_id(cid) or cid
+            if root_cid in cli_cids or root_cid in archived_cids:
+                continue
+            tpath = BRAIN_DIR / root_cid / ".system_generated" / "logs" / "transcript.jsonl"
+            if root_cid not in candidates and root_cid not in sidebar_cids and not tpath.is_file():
+                continue
+            view_candidates[root_cid] = max(view_candidates.get(root_cid, 0.0), v_ts)
+
+        if view_candidates:
+            v_ranked = sorted(view_candidates.items(), key=lambda kv: kv[1], reverse=True)
+            top_v_cid, top_v_ts = v_ranked[0]
+            if (time.time() - top_v_ts) <= 43_200.0:
+                if active_cids:
+                    for cid, ts in v_ranked:
+                        if cid not in active_cids:
+                            # Only prefer an unbound window if it was also viewed recently
+                            # (within 5 min of the top viewed window), preventing jumps to stale tabs
+                            # when the user closes & immediately reopens Context Card in the same window.
+                            if (top_v_ts - ts) <= 300.0:
+                                return cid
+                            break
+                return top_v_cid
 
     if not candidates and BRAIN_DIR.is_dir():
         try:
@@ -553,7 +640,7 @@ def _find_latest_conversation_id(exclude_active_panes: bool = False) -> str | No
                 except OSError:
                     continue
                 root_cid = _resolve_root_conversation_id(entry.name) or entry.name
-                if root_cid in cli_cids:
+                if root_cid in cli_cids or root_cid in archived_cids:
                     continue
                 candidates[root_cid] = max(candidates.get(root_cid, 0.0), st.st_mtime)
         except OSError:
@@ -905,6 +992,7 @@ def _build_snapshot(
             "used_tokens": 0,
             "active_input_tokens": 0,
             "limit_tokens": 512_000,
+            "native_limit_tokens": 512_000,
             "used_pct": 0.0,
             "free_tokens": 512_000,
             "cache_read_tokens": 0,
@@ -1008,9 +1096,11 @@ def open_context_card(conversation_id: str | None = None, ctx: Context | None = 
             _record_explicit_open(str(snap["conversation_id"]))
         else:
             _record_manual_auto_open()
+        native_lim = int(snap.get("native_limit_tokens") or snap["limit_tokens"])
+        native_note = f", native {_fmt_k(native_lim)}" if native_lim > snap["limit_tokens"] else ""
         text = (
             f"Context Card ({snap['conversation_id'][:8]}) — {snap['model_display']}: "
-            f"{snap['used_pct']}% used ({_fmt_k(snap['used_tokens'])} / {_fmt_k(snap['limit_tokens'])}), "
+            f"{snap['used_pct']}% used ({_fmt_k(snap['used_tokens'])} / {_fmt_k(snap['limit_tokens'])}{native_note}), "
             f"cache hit {snap['cache_hit_pct']}%, {snap['checkpoint_count']} checkpoints."
         )
     return types.CallToolResult(
@@ -1081,25 +1171,32 @@ def _extract_title_fast(tpath: Path, cid: str) -> str:
 
 
 def _list_recent_conversations(limit: int = 10) -> list[dict[str, Any]]:
+    view_map, archived_cids = _get_user_view_times(limit=40)
     sidebar_items = _query_sidebar_summaries(limit=max(limit * 2, 20))
     if sidebar_items:
-        out: list[dict[str, Any]] = []
+        ranked_sidebar: list[tuple[float, dict[str, Any]]] = []
         for item in sidebar_items:
             cid = item["conversation_id"]
+            if cid in archived_cids:
+                continue
             tpath = BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
             if not tpath.is_file():
                 continue
             title = item["title"] or _extract_title_fast(tpath, cid)
-            out.append(
-                {
-                    "conversation_id": cid,
-                    "short_id": cid[:8],
-                    "title": title,
-                    "updated_at": item["last_modified_time"] or item["last_user_input_time"],
-                }
+            sort_ts = max(float(item["user_ts"]), float(item["mod_ts"]), float(view_map.get(cid, 0.0)))
+            ranked_sidebar.append(
+                (
+                    sort_ts,
+                    {
+                        "conversation_id": cid,
+                        "short_id": cid[:8],
+                        "title": title,
+                        "updated_at": item["last_modified_time"] or item["last_user_input_time"],
+                    },
+                )
             )
-            if len(out) >= limit:
-                break
+        ranked_sidebar.sort(key=lambda x: x[0], reverse=True)
+        out = [row for _ts, row in ranked_sidebar[:limit]]
         if out:
             return out
 

@@ -163,12 +163,14 @@ def _load_or_parse_transcript(
     ws_hint: str,
     data_dir: Path,
 ) -> dict[str, Any]:
+    _CACHE_SCHEMA = 2
     st = tpath.stat()
     cache_dir = data_dir / "cli_cache"
     cache_path = cache_dir / f"transcript_{cid}.json"
     cached = _read_json_safe(cache_path)
     if (
-        cached.get("_mtime_ns") == st.st_mtime_ns
+        cached.get("_schema") == _CACHE_SCHEMA
+        and cached.get("_mtime_ns") == st.st_mtime_ns
         and cached.get("_size") == st.st_size
         and cached.get("_ws_hint") == ws_hint
         and isinstance(cached.get("snapshot"), dict)
@@ -189,10 +191,12 @@ def _load_or_parse_transcript(
     # Persist compact breakdown + turn metadata for fast statusLine cache hits
     compact = {
         "conversation_id": snap["conversation_id"],
+        "model_id": snap.get("model_id"),
         "model_display": snap["model_display"],
         "used_tokens": snap["used_tokens"],
         "active_input_tokens": snap["active_input_tokens"],
         "limit_tokens": snap["limit_tokens"],
+        "native_limit_tokens": snap.get("native_limit_tokens", snap["limit_tokens"]),
         "used_pct": snap["used_pct"],
         "cache_hit_pct": snap["cache_hit_pct"],
         "checkpoint_count": snap["checkpoint_count"],
@@ -207,6 +211,7 @@ def _load_or_parse_transcript(
         core.write_json_atomic(
             cache_path,
             {
+                "_schema": _CACHE_SCHEMA,
                 "_mtime_ns": st.st_mtime_ns,
                 "_size": st.st_size,
                 "_ws_hint": ws_hint,
@@ -693,8 +698,20 @@ def render_statusline(payload: dict[str, Any], args: argparse.Namespace) -> str:
     if snap is not None:
         categories = snap.get("categories") or []
         used_tokens = int(snap.get("used_tokens") or 0)
-        limit_tokens = cw_size if cw_size > 0 else int(snap.get("limit_tokens") or 512_000)
-        used_pct = round((used_tokens / float(limit_tokens)) * 100.0, 1) if limit_tokens > 0 else 0.0
+        active_in_tokens = int(snap.get("active_input_tokens") or 0)
+        base_eff = int(snap.get("limit_tokens") or core.ANTIGRAVITY_COMPACT_LIMIT)
+        base_native = int(snap.get("native_limit_tokens") or base_eff)
+        if cw_size > 0:
+            base_native = max(base_native, cw_size)
+            if cw_size < base_eff:
+                base_eff = cw_size
+        limit_tokens, _native_limit = core.resolve_effective_limit(
+            base_eff,
+            base_native,
+            used_tokens,
+            active_in_tokens,
+        )
+        used_pct = min(100.0, round((used_tokens / float(limit_tokens)) * 100.0, 1)) if limit_tokens > 0 else 0.0
         cache_hit_pct = float(snap.get("cache_hit_pct") or 0.0)
         ckpt_count = int(snap.get("checkpoint_count") or 0)
         if not model_label:
@@ -702,18 +719,28 @@ def render_statusline(payload: dict[str, Any], args: argparse.Namespace) -> str:
         turn_info = snap.get("_turn_info") or {}
     else:
         categories = []
-        _, fallback_limit = core.format_model(model_label or None)
-        limit_tokens = cw_size if cw_size > 0 else fallback_limit
-        used_pct = round(float(cw.get("used_percentage") or 0.0), 1)
+        _, fallback_eff, fallback_native = core.format_model_limits(model_label or None)
+        base_native = max(fallback_native, cw_size) if cw_size > 0 else fallback_native
+        base_eff = min(fallback_eff, cw_size) if cw_size > 0 else fallback_eff
+        raw_cli_pct = float(cw.get("used_percentage") or 0.0)
         cur_u = cw.get("current_usage") or {}
         cur_in = int(cur_u.get("input_tokens") or 0)
         cur_cr = int(cur_u.get("cache_read_input_tokens") or 0)
-        if cur_in + cur_cr > 0:
-            used_tokens = cur_in + cur_cr + int(cur_u.get("output_tokens") or 0)
-            cache_hit_pct = round((cur_cr / float(cur_in + cur_cr)) * 100.0, 1)
+        active_in_tokens = cur_in + cur_cr
+        if active_in_tokens > 0:
+            used_tokens = active_in_tokens + int(cur_u.get("output_tokens") or 0)
+            cache_hit_pct = round((cur_cr / float(active_in_tokens)) * 100.0, 1)
         else:
-            used_tokens = int(round(limit_tokens * used_pct / 100.0)) if limit_tokens > 0 else 0
+            ref_size = cw_size if cw_size > 0 else base_native
+            used_tokens = int(round(ref_size * raw_cli_pct / 100.0)) if ref_size > 0 else 0
             cache_hit_pct = 0.0
+        limit_tokens, _native_limit = core.resolve_effective_limit(
+            base_eff,
+            base_native,
+            used_tokens,
+            active_in_tokens,
+        )
+        used_pct = min(100.0, round((used_tokens / float(limit_tokens)) * 100.0, 1)) if limit_tokens > 0 else 0.0
         ckpt_count = 0
         turn_info = {"state": "idle", "turn_key": ""}
 

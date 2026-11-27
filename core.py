@@ -82,10 +82,22 @@ def sanitize_cid(raw: str | None, brain_dir: Path | None = None) -> str | None:
     return s
 
 
-def format_model(model_id: str | None) -> tuple[str, int]:
-    """Return (human_readable_name, context_limit_tokens)."""
+ANTIGRAVITY_COMPACT_LIMIT = 512_000
+_OVERFLOW_INPUT_BUFFER = 32_000
+_OVERFLOW_TOTAL_BUFFER = 48_000
+
+
+def format_model_limits(model_id: str | None) -> tuple[str, int, int]:
+    """Return (human_readable_name, effective_limit_tokens, native_limit_tokens).
+
+    Antigravity auto-compacts Gemini 1M-window models around ~512K tokens (500K-512K
+    observed across real sessions), while `agy statusLine` / API specs report the
+    1,048,576 native window. Returning both lets the UI track real headroom before
+    compaction while auto-lifting back to the native 1M ceiling if a session ever
+    exceeds the 512K threshold.
+    """
     if not model_id:
-        return ("Unknown model", 512_000)
+        return ("Unknown model", ANTIGRAVITY_COMPACT_LIMIT, ANTIGRAVITY_COMPACT_LIMIT)
 
     raw = model_id.strip()
     low = raw.lower()
@@ -101,14 +113,14 @@ def format_model(model_id: str | None) -> tuple[str, int]:
                 "orchestrator",
             )
         ):
-            return (raw, 1_048_576)
+            return (raw, ANTIGRAVITY_COMPACT_LIMIT, 1_048_576)
         if any(k in low for k in ("claude opus 5.5", "claude sonnet 5.5", "claude opus 5", "claude sonnet 5")):
-            return (raw, 1_000_000)
+            return (raw, 1_000_000, 1_000_000)
         if "claude" in low:
-            return (raw, 200_000)
+            return (raw, 200_000, 200_000)
         if "gpt-oss" in low:
-            return (raw, 131_072)
-        return (raw, 512_000)
+            return (raw, 131_072, 131_072)
+        return (raw, ANTIGRAVITY_COMPACT_LIMIT, ANTIGRAVITY_COMPACT_LIMIT)
 
     effort_map = {
         "-xhigh": " (XHigh)",
@@ -124,46 +136,86 @@ def format_model(model_id: str | None) -> tuple[str, int]:
             base = base[: -len(suf)]
             break
 
-    # Known Antigravity model context limits (aligned with `agy models` & statusLine `context_window_size`).
+    # Known Antigravity model limits: (prefix, display_name, effective_compact_limit, native_limit).
     # Unknown models fall back conservatively to 512K so compaction warnings fire early rather than late.
-    rules: list[tuple[str, str, int]] = [
-        ("gemini-4-neon", "Gemini 4 Neon", 1_048_576),
-        ("gemini-4-carbon", "Gemini 4 Carbon", 1_048_576),
-        ("gemini-4-argon", "Gemini 4 Argon", 1_048_576),
-        ("gemini-4-hydrogen", "Gemini 4 Hydrogen", 1_048_576),
-        ("gemini-pro-orchestrator-neon", "Orchestrator (Neon)", 1_048_576),
-        ("gemini-pro-orchestrator-argon", "Orchestrator (Argon)", 1_048_576),
-        ("gemini-pro-orchestrator-carbon", "Orchestrator (Carbon)", 1_048_576),
-        ("gemini-pro-orchestrator", "Orchestrator (Carbon)", 1_048_576),
-        ("gemini-3.8-flash", "Gemini 3.8 Flash", 1_048_576),
-        ("gemini-3-8-flash", "Gemini 3.8 Flash", 1_048_576),
-        ("gemini-3.7-flash", "Gemini 3.7 Flash", 1_048_576),
-        ("gemini-3-7-flash", "Gemini 3.7 Flash", 1_048_576),
-        ("gemini-3.6-flash", "Gemini 3.6 Flash", 1_048_576),
-        ("gemini-3-6-flash", "Gemini 3.6 Flash", 1_048_576),
-        ("gemini-3.1-pro", "Gemini 3.1 Pro", 1_048_576),
-        ("gemini-3-1-pro", "Gemini 3.1 Pro", 1_048_576),
-        ("gemini-3", "Gemini 3", 1_048_576),
-        ("gemini-2.5", "Gemini 2.5", 1_048_576),
-        ("gemini-2-5", "Gemini 2.5", 1_048_576),
-        ("claude-opus-5-5", "Claude Opus 5.5", 1_000_000),
-        ("claude-opus-5.5", "Claude Opus 5.5", 1_000_000),
-        ("claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000),
-        ("claude-sonnet-5.5", "Claude Sonnet 5.5", 1_000_000),
-        ("claude-opus-4-6", "Claude Opus 4.6", 200_000),
-        ("claude-opus-4.6", "Claude Opus 4.6", 200_000),
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 200_000),
-        ("claude-sonnet-4.6", "Claude Sonnet 4.6", 200_000),
-        ("claude-opus-4", "Claude Opus 4", 200_000),
-        ("claude-sonnet-4", "Claude Sonnet 4", 200_000),
-        ("gpt-oss-120b", "GPT-OSS 120B", 131_072),
+    rules: list[tuple[str, str, int, int]] = [
+        ("gemini-4-neon", "Gemini 4 Neon", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-4-carbon", "Gemini 4 Carbon", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-4-argon", "Gemini 4 Argon", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-pro-orchestrator-neon", "Orchestrator (Neon)", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-pro-orchestrator-argon", "Orchestrator (Argon)", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-pro-orchestrator-carbon", "Orchestrator (Carbon)", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-pro-orchestrator", "Orchestrator (Carbon)", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3.8-flash", "Gemini 3.8 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3-8-flash", "Gemini 3.8 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3.7-flash", "Gemini 3.7 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3-7-flash", "Gemini 3.7 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3.6-flash", "Gemini 3.6 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3-6-flash", "Gemini 3.6 Flash", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3.1-pro", "Gemini 3.1 Pro", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3-1-pro", "Gemini 3.1 Pro", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-3", "Gemini 3", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-2.5", "Gemini 2.5", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("gemini-2-5", "Gemini 2.5", ANTIGRAVITY_COMPACT_LIMIT, 1_048_576),
+        ("claude-opus-5-5", "Claude Opus 5.5", 1_000_000, 1_000_000),
+        ("claude-opus-5.5", "Claude Opus 5.5", 1_000_000, 1_000_000),
+        ("claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000, 1_000_000),
+        ("claude-sonnet-5.5", "Claude Sonnet 5.5", 1_000_000, 1_000_000),
+        ("claude-opus-4-6", "Claude Opus 4.6", 200_000, 200_000),
+        ("claude-opus-4.6", "Claude Opus 4.6", 200_000, 200_000),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 200_000, 200_000),
+        ("claude-sonnet-4.6", "Claude Sonnet 4.6", 200_000, 200_000),
+        ("claude-opus-4", "Claude Opus 4", 200_000, 200_000),
+        ("claude-sonnet-4", "Claude Sonnet 4", 200_000, 200_000),
+        ("gpt-oss-120b", "GPT-OSS 120B", 131_072, 131_072),
     ]
-    for prefix, display, limit in rules:
+    for prefix, display, eff_limit, native_limit in rules:
         if base.startswith(prefix):
-            return (f"{display}{effort_suffix}", limit)
+            return (f"{display}{effort_suffix}", eff_limit, native_limit)
 
     pretty = " ".join(part.capitalize() for part in base.replace("_", "-").split("-") if part)
-    return (f"{pretty}{effort_suffix}", 512_000)
+    return (f"{pretty}{effort_suffix}", ANTIGRAVITY_COMPACT_LIMIT, ANTIGRAVITY_COMPACT_LIMIT)
+
+
+def format_model(model_id: str | None) -> tuple[str, int]:
+    """Return (human_readable_name, effective_context_limit_tokens)."""
+    display, eff_limit, _native = format_model_limits(model_id)
+    return (display, eff_limit)
+
+
+def resolve_effective_limit(
+    effective_limit: int,
+    native_limit: int,
+    used_tokens: int,
+    active_input_tokens: int = 0,
+) -> tuple[int, int]:
+    """Resolve (limit_tokens, native_limit_tokens) with adaptive overflow lift.
+
+    Stays on the effective auto-compact limit (e.g. 512K) right up to compaction
+    (including small ~1-2% overshoot right before a CHECKPOINT fires), and lifts
+    automatically to the native window (e.g. 1M) if the active session genuinely
+    exceeds the compaction ceiling (e.g. if Antigravity raises the cap later).
+    """
+    eff = max(1, int(effective_limit or ANTIGRAVITY_COMPACT_LIMIT))
+    nat = max(eff, int(native_limit or eff))
+
+    env_override = (os.environ.get("CONTEXT_CARD_CONTEXT_LIMIT") or "").strip()
+    if env_override:
+        try:
+            custom = int(env_override)
+            if custom >= 1_000:
+                return (custom, max(nat, custom))
+        except ValueError:
+            pass
+
+    if nat > eff:
+        if (
+            active_input_tokens > eff + _OVERFLOW_INPUT_BUFFER
+            or used_tokens > eff + _OVERFLOW_TOTAL_BUFFER
+        ):
+            return (nat, nat)
+    return (eff, nat)
 
 
 def est_tokens_from_text(text: str | None) -> int:
@@ -746,7 +798,7 @@ def parse_transcript(
         if rows[idx].get("model"):
             model_id = rows[idx]["model"]
             break
-    model_display, model_limit = format_model(model_id)
+    model_display, eff_model_limit, native_model_limit = format_model_limits(model_id)
 
     active_start = last_cp_idx + 1 if last_cp_idx >= 0 else 0
     active_planners = [i for i in planner_indices if i >= active_start]
@@ -1006,8 +1058,20 @@ def parse_transcript(
 
     skills_total_tokens = skills_base_tokens + skills_loaded_tokens
     total_used = active_input_total + since_last_update_tokens
+    active_max_input = active_input_total
+    for idx in active_planners:
+        r_act = rows[idx]
+        p_tot = int(r_act.get("input_tokens") or 0) + int(r_act.get("cache_read_tokens") or 0)
+        if p_tot > active_max_input:
+            active_max_input = p_tot
+    model_limit, native_limit = resolve_effective_limit(
+        eff_model_limit,
+        native_model_limit,
+        total_used,
+        active_max_input,
+    )
     free_space = max(0, model_limit - total_used)
-    used_pct = round((total_used / model_limit) * 100, 1) if model_limit > 0 else 0.0
+    used_pct = min(100.0, round((total_used / model_limit) * 100, 1)) if model_limit > 0 else 0.0
     cache_hit_pct = round((last_cache_read / active_input_total) * 100, 1) if active_input_total > 0 else 0.0
 
     categories: list[dict[str, Any]] = [
@@ -1102,6 +1166,11 @@ def parse_transcript(
             }
         )
 
+    free_hint = (
+        f"Remaining tokens before Antigravity auto-compaction (~{fmt_k(model_limit)}; model native window {fmt_k(native_limit)})"
+        if native_limit > model_limit
+        else "Remaining tokens before hitting the model context limit"
+    )
     categories.append(
         {
             "key": "free_space",
@@ -1109,7 +1178,7 @@ def parse_transcript(
             "tokens": free_space,
             "pct": round((free_space / model_limit) * 100, 1) if model_limit else 0.0,
             "color": "var(--ctx-free, #323238)",
-            "hint": "Remaining tokens before hitting the model context limit",
+            "hint": free_hint,
             "is_free": True,
         }
     )
@@ -1145,6 +1214,7 @@ def parse_transcript(
         "used_tokens": total_used,
         "active_input_tokens": active_input_total,
         "limit_tokens": model_limit,
+        "native_limit_tokens": native_limit,
         "used_pct": used_pct,
         "free_tokens": free_space,
         "cache_read_tokens": last_cache_read,

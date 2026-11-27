@@ -212,6 +212,11 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+.ctx-native {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
 .bar-track {
   display: flex;
   align-items: stretch;
